@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: ./eval/snapkv_eval.sh [--check] [--resume OUTPUT_DIR] [MODEL_DIR]
+# Usage: ./eval/snapkv_eval.sh [MODEL_DIR] [--check] [--resume OUTPUT_DIR] [--contexts 512 1024 2048]
 # Optional: PYTHON, BASELINE_BIN, SNAPKV_BIN, EVAL_CPUS, EVAL_OUTPUT.
 set -euo pipefail
 

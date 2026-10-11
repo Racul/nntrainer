@@ -429,7 +429,7 @@ Tensor Transformer::createTransformerDecoderBlock(const int layer_id,
  */
 std::pair<Tensor, Tensor>
 Transformer::createKVCachePlaceholders(const int layer_id, int n_heads) {
-  const unsigned int max_timestep = static_cast<unsigned int>(MAX_SEQ_LEN);
+  const unsigned int max_timestep = initialKVCacheCapacity();
   const unsigned int kv_width =
     static_cast<unsigned int>(HEAD_DIM * n_heads / GQA_SIZE);
   const std::string cache_shape = std::to_string(BATCH_SIZE) +

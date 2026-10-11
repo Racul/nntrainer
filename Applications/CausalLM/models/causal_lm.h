@@ -204,6 +204,7 @@ protected:
   bool SKIP_PREFILL;
   unsigned int global_token_len;
   std::vector<std::string> snapkv_properties_; /**< Empty when disabled */
+  unsigned int snapkv_budget_ = 0; /**< Retained prompt tokens; zero disables */
 
   std::mt19937 rng; /**< Random Number Gen */
 
@@ -224,6 +225,10 @@ protected:
    *        initialize().
    */
   virtual void allocateAndBindKVCache();
+
+  /** @brief Replace compacted prompt KV storage before decoding. */
+  unsigned int initialKVCacheCapacity() const override;
+  void shrinkSnapKVCache();
 
   /**
    * @brief Reset all mha_core layers' cache_index to @p pos and the

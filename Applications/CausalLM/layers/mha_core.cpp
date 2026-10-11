@@ -737,20 +737,32 @@ void MHACoreLayer::one_batch_incremental_forwarding(
                                       physical_from * cache_value_dim.width(),
                                     true);
 
-  // append kcache with or without rotary embedding
-  apply_rotary_emb_tensor_v2(key_step, b_cache_key_step, head_dim, cache_index,
+  // Projection K/V still have Hkv heads. After compression, write this token
+  // into the start of an Hq row, apply absolute RoPE, then repeat its heads.
+  auto projected_key_dim = cache_key_step_dim;
+  auto projected_value_dim = cache_value_step_dim;
+  projected_key_dim.width(key_step.width());
+  projected_value_dim.width(value_step.width());
+  auto key_write =
+    b_cache_key_step.getSharedDataTensor(projected_key_dim, 0, true);
+  auto value_write =
+    b_cache_value_step.getSharedDataTensor(projected_value_dim, 0, true);
+  apply_rotary_emb_tensor_v2(key_step, key_write, head_dim, cache_index,
                              !use_rope);
 
-  // append vcache without rotary embedding
   if (query_step.getDataType() == ml::train::TensorDim::DataType::FP32) {
-    apply_rotary_emb_tensor_v2(value_step, b_cache_value_step, head_dim,
-                               cache_index, true);
+    apply_rotary_emb_tensor_v2(value_step, value_write, head_dim, cache_index,
+                               true);
   } else if (query_step.getDataType() == ml::train::TensorDim::DataType::FP16) {
 #ifdef ENABLE_FP16
-    b_cache_value_step.copyData(value_step);
+    value_write.copyData(value_step);
 #else
     NNTR_THROW_IF(true, std::invalid_argument) << "enable-fp16 is not set!";
 #endif
+  }
+  if (snapkv_.compressed()) {
+    SnapKVState::repeatKV(b_cache_key_step, num_heads_KV, head_dim);
+    SnapKVState::repeatKV(b_cache_value_step, num_heads_KV, head_dim);
   }
 
   bool is_prefill = !from || step_size > 1;
@@ -784,7 +796,9 @@ void MHACoreLayer::one_batch_incremental_forwarding(
                                    : (step_size * cache_to),
                          num_heads_Q, query_step.getTensorType());
 
-  unsigned int gqa_size = num_heads_Q / num_heads_KV;
+  const unsigned int cache_heads =
+    snapkv_.compressed() ? num_heads_Q : num_heads_KV;
+  const unsigned int gqa_size = num_heads_Q / cache_heads;
 
   compute_kcaches(query_step, b_cached_key, out_, cache_from,
                   cache_to - cache_from, num_heads_Q, gqa_size, head_dim);
@@ -792,7 +806,7 @@ void MHACoreLayer::one_batch_incremental_forwarding(
   softmax_triangle(out_, step_size, num_heads_Q, cache_from);
 
   compute_fp16vcache_transposed(out_, b_cached_value, attention_output_step,
-                                cache_from, num_heads_KV, gqa_size, head_dim,
+                                cache_from, cache_heads, gqa_size, head_dim,
                                 cache_to);
 
   snapkv_.finishStep(out_, cache_key, cache_value, cache_index, step_size,

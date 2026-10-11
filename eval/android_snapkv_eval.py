@@ -7,7 +7,7 @@ Examples:
   ./eval/android_snapkv_eval.sh sweep --budget 256 --window 16 --kernel 5
 
 Requires a SnapKV-enabled Android CausalLM build already deployed to the device.
-Default contexts are 512/1024/2048 tokens; cache capacity remains 4224.
+Default contexts are 512/1024/2048 tokens; initial cache capacity is 2176.
 The shared evaluator temporarily adds snapkv settings, records raw latency/RSS
 and exact configs, and restores the original device config. Outputs are placed
 under nntrainer/logs/android_snapkv/. Sampling/EOS remain unchanged.

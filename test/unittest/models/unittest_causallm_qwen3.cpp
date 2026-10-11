@@ -16,8 +16,10 @@
 
 #include <layer.h>
 #include <layer_context.h>
+#include <mha_core.h>
 #include <qwen3_causallm.h>
 #include <qwen3_embedding.h>
+#include <snapkv.h>
 
 #include <algorithm>
 #include <cmath>
@@ -37,6 +39,30 @@ namespace {
  */
 using TinyQwen3CausalLM =
   causallm_test::CausalLMTestAdapter<causallm::Qwen3CausalLM>;
+
+/** @brief Inspect cache ownership without changing the production interface. */
+class SnapKVQwen3 : public TinyQwen3CausalLM {
+public:
+  SnapKVQwen3(causallm::json &cfg, causallm::json &generation,
+              causallm::json &nntr) :
+    causallm::Transformer(cfg, generation, nntr, causallm::ModelType::CAUSALLM),
+    TinyQwen3CausalLM(cfg, generation, nntr) {}
+
+  using causallm::CausalLM::kv_cache;
+  using causallm::CausalLM::shrinkSnapKVCache;
+  std::vector<std::weak_ptr<nntrainer::MemoryData>> original_storage;
+
+  void allocateAndBindKVCache() override {
+    causallm::CausalLM::allocateAndBindKVCache();
+    if (original_storage.empty()) {
+      for (unsigned int i = 0; i < kv_cache.getNumLayers(); ++i) {
+        original_storage.emplace_back(kv_cache.getKeyCache(i).getMemoryData());
+        original_storage.emplace_back(
+          kv_cache.getValueCache(i).getMemoryData());
+      }
+    }
+  }
+};
 
 /**
  * @brief Populate deterministic tiny Qwen3 weights for golden token tests
@@ -433,6 +459,285 @@ TEST_P(CausalLMTinyModelTest, WeightRoundTripProducesSameLogits) {
 TEST_P(CausalLMTinyModelTest, PromptProducesExpectedLogits) {
   const auto files = makeFiles();
   causallm_test::expectPromptProducesExpectedLogits(GetParam(), files);
+}
+
+/** @brief Golden data from the cloned SnapKVCluster.update_kv(), not our
+ * selector. Reference e216ddc84c5bd210378cbdbbba12ba02102aa640, torch 2.14.1
+ * CPU, seed 17; Hq=4, Hkv=2, L=10, D=4, W=2, C=5, kernel=3. Q=randn*0.4;
+ * K[p,h]=[p,p*p%7,2*h+1,(p+h)%3]. Probabilities below are the final two causal
+ * softmax rows in NNTrainer's token/head layout. Expected positions were read
+ * from the official helper's gathered V.
+ */
+TEST(Qwen3SnapKVTest, MatchesOfficialHeadwiseSelection) {
+  using nntrainer::Tensor;
+  using nntrainer::TensorDim;
+  const float observation[] = {
+    0.11693424f,   0.0368258059f, 0.163079813f,  0.163869143f,  0.102730542f,
+    0.0509713925f, 0.155099317f,  0.185908049f,  0.0843179077f, 0.0748813078f,
+    0.107150026f,  0.196744025f,  0.119671091f,  0.0720876977f, 0.115636505f,
+    0.12293461f,   0.108771719f,  0.0968498811f, 0.114710264f,  0.114322685f,
+    0.09236449f,   0.138105094f,  0.0826575086f, 0.0991728827f, 0.135626122f,
+    0.129050925f,  0.0930427685f, 0.0507952049f, 0.127537787f,  0.168291703f,
+    0.0962692648f, 0.0387202501f, 0.112046115f,  0.232936189f,  0.0723544657f,
+    0.0275331493f, 0.15030849f,   0.189281628f,  0.301897615f,  0.152689293f,
+    0.152504772f,  0.155468896f,  0.224180952f,  0.120787695f,  0.256905556f,
+    0.101153478f,  0.146943405f,  0.0626510978f, 0.112056784f,  0.105231784f,
+    0.106030345f,  0.0948117673f, 0.088235423f,  0.0971137881f, 0.07798592f,
+    0.0931071043f, 0.115355425f,  0.0709932521f, 0.0506307818f, 0.059950836f,
+    0.0390487947f, 0.082981661f,  0.0361861028f, 0.112625122f,  0.0238625817f,
+    0.0860428885f, 0.0263617896f, 0.137297422f,  0.0242112596f, 0.0706724301f,
+    0.0169519763f, 0.109744117f,  0.0375108905f, 0.041060254f,  0.0128311403f,
+    0.0563355349f};
+  const unsigned int expected[2][4][5] = {
+    {{1, 2, 3, 8, 9}, {6, 5, 1, 8, 9}, {1, 2, 0, 8, 9}, {1, 2, 3, 8, 9}},
+    {{1, 3, 2, 8, 9}, {7, 6, 1, 8, 9}, {1, 0, 2, 8, 9}, {1, 0, 2, 8, 9}}};
+  unsigned int mode = 0;
+  for (const auto *pooling : {"avgpool", "maxpool"}) {
+    SCOPED_TRACE(pooling);
+    Tensor probs(TensorDim(1, 1, 55, 4), true);
+    probs.setZero();
+    std::copy(std::begin(observation), std::end(observation),
+              probs.getData<float>() + (8 * 9 / 2) * 4);
+    Tensor key(TensorDim(1, 1, 10, 8), true);
+    Tensor value(key.getDim(), true);
+    for (unsigned int p = 0; p < 10; ++p) {
+      for (unsigned int h = 0; h < 2; ++h) {
+        const float k[] = {float(p), float(p * p % 7), float(h * 2 + 1),
+                           float((p + h) % 3)};
+        for (unsigned int d = 0; d < 4; ++d) {
+          key.getData<float>()[p * 8 + h * 4 + d] = k[d];
+          value.getData<float>()[p * 8 + h * 4 + d] = p * 100 + h * 10 + d;
+        }
+      }
+    }
+    causallm::SnapKVState state;
+    state.consumeProperty("snapkv_budget", "5");
+    state.consumeProperty("snapkv_window", "2");
+    state.consumeProperty("snapkv_kernel", "3");
+    state.consumeProperty("snapkv_pooling", pooling);
+    state.consumeProperty("snapkv_prompt_length", "10");
+    state.finishStep(probs, key, value, 0, 10, 4, 2, 4);
+    // Packed Hq cache is staged in the host slab until post-prefill rebinding.
+    ASSERT_GE(key.size(), 5u * 4 * 4);
+    EXPECT_EQ(state.physicalPosition(10), 5u);
+    for (unsigned int h = 0; h < 4; ++h) {
+      for (unsigned int row = 0; row < 5; ++row) {
+        const auto p = expected[mode][h][row];
+        const float k[] = {float(p), float(p * p % 7), float((h / 2) * 2 + 1),
+                           float((p + h / 2) % 3)};
+        for (unsigned int d = 0; d < 4; ++d) {
+          EXPECT_FLOAT_EQ(key.getData<float>()[row * 16 + h * 4 + d], k[d]);
+          EXPECT_FLOAT_EQ(value.getData<float>()[row * 16 + h * 4 + d],
+                          p * 100 + (h / 2) * 10 + d);
+        }
+      }
+    }
+    ++mode;
+  }
+}
+
+/** @brief Compare actual prefill/decode attention to the official compressed
+ * cache. Same seed/model-free fixture as MatchesOfficialHeadwiseSelection.
+ * Reference decode is softmax(Q @ cat(K_compressed, repeat_kv(K_new)) /
+ * sqrt(D)) @ V. RoPE is disabled here: K/Q represent already rotated vectors;
+ * absolute positions and physical bounds are separately exercised by the model
+ * test.
+ */
+TEST(Qwen3SnapKVTest, DecodeUsesIndependentCompressedHeads) {
+  using nntrainer::Tensor;
+  using nntrainer::TensorDim;
+  const float q_observation[] = {
+    0.0607655942f,  -0.0680129752f, -0.0240471847f,  -0.251757085f,
+    0.408073753f,   0.0595740862f,  0.14272134f,     0.182483673f,
+    -0.173016176f,  -0.0842638165f, -0.00981722772f, 0.156931907f,
+    -0.456692606f,  0.39762333f,    0.183313608f,    0.311437339f,
+    -0.533793688f,  0.507006526f,   0.36260125f,     0.055799406f,
+    -0.236036062f,  -0.233016536f,  0.550661206f,    0.0754720643f,
+    -0.710325122f,  0.0191251338f,  -0.164085746f,   0.09593115f,
+    -0.0293708742f, -0.432455301f,  0.334746331f,    -0.00691506127f};
+  const float q_decode[] = {
+    0.212234959f, 0.107677519f,  0.414767563f, -0.881746113f,
+    0.257902771f, -0.383747399f, 0.178663597f, 0.114914536f,
+    0.319978356f, 0.0727683827f, -0.60705024f, -0.251730323f,
+    0.10960336f,  0.531924665f,  0.374941677f, 0.0257930346f};
+  const float prefill_reference[] = {
+    286.482422f, 287.482391f, 288.482361f, 289.482361f,
+    345.20047f,  346.20047f,  347.200439f, 348.200439f,
+    215.400146f, 216.400162f, 217.400146f, 218.400162f,
+    432.451294f, 433.451294f, 434.451294f, 435.451324f};
+  const float decode_reference[] = {
+    698.380859f, 699.380859f, 700.380859f, 701.380859f,
+    735.131226f, 736.131165f, 737.131165f, 738.131165f,
+    741.724426f, 742.724487f, 743.724426f, 744.724426f,
+    636.917786f, 637.917725f, 638.917786f, 639.917725f};
+  Tensor query(TensorDim(1, 1, 10, 16), true);
+  query.setZero();
+  std::copy(std::begin(q_observation), std::end(q_observation),
+            query.getData<float>() + 8 * 16);
+  Tensor key(TensorDim(1, 1, 10, 8), true);
+  Tensor value(key.getDim(), true);
+  for (unsigned int p = 0; p < 10; ++p) {
+    for (unsigned int h = 0; h < 2; ++h) {
+      const float k[] = {float(p), float(p * p % 7), float(h * 2 + 1),
+                         float((p + h) % 3)};
+      for (unsigned int d = 0; d < 4; ++d) {
+        key.getData<float>()[p * 8 + h * 4 + d] = k[d];
+        value.getData<float>()[p * 8 + h * 4 + d] = p * 100 + h * 10 + d;
+      }
+    }
+  }
+  Tensor cache_key(TensorDim(1, 1, 16, 8), true);
+  Tensor cache_value(cache_key.getDim(), true);
+  Tensor output(query.getDim(), true);
+  causallm::MHACoreLayer layer;
+  layer.setProperty({"num_heads=4", "num_heads_kv=2", "max_timestep=16",
+                     "use_rope=false", "snapkv_budget=5", "snapkv_window=2",
+                     "snapkv_kernel=3", "snapkv_pooling=avgpool",
+                     "snapkv_prompt_length=10"});
+  nntrainer::InitLayerContext init({query.getDim(), key.getDim(),
+                                    value.getDim(), cache_key.getDim(),
+                                    cache_value.getDim()},
+                                   {true}, false, "snapkv_attention");
+  layer.finalize(init);
+  auto cache_dim = cache_key.getDim();
+  auto step_dim = cache_dim;
+  step_dim.height(10);
+  layer.one_batch_incremental_forwarding(0, 0, 0, 10, query, key, value, output,
+                                         cache_key, cache_value, cache_dim,
+                                         step_dim, cache_dim, step_dim);
+  for (unsigned int d = 0; d < 16; ++d)
+    EXPECT_NEAR(output.getData<float>()[9 * 16 + d], prefill_reference[d],
+                0.001f);
+
+  // Host adopts the packed C x Hq prefix and reserves one decode row.
+  Tensor small_key(TensorDim(1, 1, 6, 16), true);
+  Tensor small_value(small_key.getDim(), true);
+  std::copy_n(cache_key.getData<float>(), 5 * 16, small_key.getData<float>());
+  std::copy_n(cache_value.getData<float>(), 5 * 16,
+              small_value.getData<float>());
+  Tensor next_query(TensorDim(1, 1, 1, 16), true);
+  Tensor next_key(TensorDim(1, 1, 1, 8), true);
+  Tensor next_value(next_key.getDim(), true);
+  Tensor next_output(next_query.getDim(), true);
+  std::copy(std::begin(q_decode), std::end(q_decode),
+            next_query.getData<float>());
+  for (unsigned int h = 0; h < 2; ++h) {
+    const float k[] = {10.0f, 2.0f, float(h * 2 + 1), float((10 + h) % 3)};
+    for (unsigned int d = 0; d < 4; ++d) {
+      next_key.getData<float>()[h * 4 + d] = k[d];
+      next_value.getData<float>()[h * 4 + d] = 1000 + h * 10 + d;
+    }
+  }
+  layer.setCacheIndex(10);
+  cache_dim = small_key.getDim();
+  step_dim = cache_dim;
+  step_dim.height(1);
+  ASSERT_NO_THROW(layer.one_batch_incremental_forwarding(
+    0, 10, 10, 11, next_query, next_key, next_value, next_output, small_key,
+    small_value, cache_dim, step_dim, cache_dim, step_dim));
+  // Only 6 rows are allocated: reading the original logical length 11 would
+  // exceed this buffer. Hq=4/gqa_size=1 must consume different head histories.
+  for (unsigned int d = 0; d < 16; ++d)
+    EXPECT_NEAR(next_output.getData<float>()[d], decode_reference[d], 0.001f);
+}
+
+/** @brief New decode K/V repeat to the independently selected query heads. */
+TEST(Qwen3SnapKVTest, RepeatsDecodeHeadsWithoutOverwritingSources) {
+  nntrainer::TensorDim dim(1, 1, 1, 24);
+  dim.setDataType(nntrainer::Tdatatype::UINT16);
+  nntrainer::Tensor token(dim, true);
+  token.setZero();
+  for (unsigned int i = 0; i < 8; ++i)
+    token.getData<uint16_t>()[i] = 100 + i;
+  causallm::SnapKVState::repeatKV(token, 2, 4);
+  for (unsigned int h = 0; h < 6; ++h)
+    for (unsigned int d = 0; d < 4; ++d)
+      EXPECT_EQ(token.getData<uint16_t>()[h * 4 + d], 100 + (h / 3) * 4 + d);
+}
+
+/** @brief Shrinking retains K/V bits and releases every old owning buffer. */
+TEST(Qwen3SnapKVTest, ReplacesStorageAndRebindsCacheViews) {
+  const auto files = causallm_test::makeTinyCausalLMFiles(
+    "Qwen3SnapKVTest", "ReplacesStorageAndRebindsCacheViews", "FP32");
+  auto cfg = makeTinyQwen3Config();
+  cfg["model_type"] = "qwen3";
+  cfg["num_hidden_layers"] = 2;
+  auto generation = causallm_test::makeTinyGenerationConfig();
+  auto nntr = causallm_test::makeTinyNntrainerConfig(
+    files.tokenizer_path, causallm_test::makeTinyFp32DataType());
+  nntr["num_to_generate"] = 3;
+  nntr["snapkv"] = {{"budget", 2}, {"window", 1}, {"kernel", 1}};
+  SnapKVQwen3 model(cfg, generation, nntr);
+  model.initializeModel();
+  model.allocateAndBindKVCache();
+  for (unsigned int i = 0; i < 2; ++i) {
+    for (auto *cache :
+         {&model.kv_cache.getKeyCache(i), &model.kv_cache.getValueCache(i)}) {
+      for (unsigned int j = 0; j < cache->size(); ++j)
+        cache->getData<uint16_t>()[j] = static_cast<uint16_t>(i * 1000 + j);
+    }
+  }
+  model.shrinkSnapKVCache();
+  EXPECT_EQ(model.kv_cache.getMaxSeqLen(), 5u);
+  EXPECT_EQ(model.kv_cache.getPosition(), 2u);
+  for (const auto &old : model.original_storage)
+    EXPECT_TRUE(old.expired());
+  for (unsigned int i = 0; i < 2; ++i) {
+    for (auto *cache :
+         {&model.kv_cache.getKeyCache(i), &model.kv_cache.getValueCache(i)}) {
+      EXPECT_EQ(cache->bytes(), 5u * 8 * 8 * sizeof(uint16_t));
+      for (unsigned int j = 0; j < 2 * cache->width(); ++j)
+        EXPECT_EQ(cache->getData<uint16_t>()[j], i * 1000 + j);
+    }
+  }
+  unsigned int cache_views = 0;
+  model.forEachLayer([&cache_views](ml::train::Layer &layer,
+                                    nntrainer::RunLayerContext &context,
+                                    void *) {
+    if (layer.getName().find("cache_k_l") == 0 ||
+        layer.getName().find("cache_v_l") == 0) {
+      EXPECT_EQ(context.getInput(0).height(), 5u);
+      EXPECT_EQ(context.getOutput(0).height(), 5u);
+      cache_views += 2;
+    } else if (layer.getType() == "mha_core") {
+      EXPECT_EQ(context.getInput(3).height(), 5u);
+      EXPECT_EQ(context.getInput(4).height(), 5u);
+      cache_views += 2;
+    }
+  });
+  EXPECT_EQ(cache_views, 12u);
+}
+
+/** @brief Decode beyond physical capacity using unchanged absolute positions.
+ */
+TEST(Qwen3SnapKVTest, RunsWithShrunkStorageAndPreservesDisabledPath) {
+  const auto files = causallm_test::makeTinyCausalLMFiles(
+    "Qwen3SnapKVTest", "RunsWithShrunkStorageAndPreservesDisabledPath", "FP32");
+  for (const int budget : {-1, 0, 8, 2}) {
+    SCOPED_TRACE(budget);
+    auto cfg = makeTinyQwen3Config();
+    cfg["model_type"] = "qwen3";
+    cfg["num_hidden_layers"] = 2;
+    auto generation = causallm_test::makeTinyGenerationConfig();
+    auto nntr = causallm_test::makeTinyNntrainerConfig(
+      files.tokenizer_path, causallm_test::makeTinyFp32DataType());
+    nntr["init_seq_len"] = 4;
+    nntr["num_to_generate"] = 3;
+    if (budget >= 0)
+      nntr["snapkv"] = {{"budget", budget}, {"window", 1}, {"kernel", 1}};
+    SnapKVQwen3 model(cfg, generation, nntr);
+    model.initializeModel();
+    setupQwen3DeterministicWeights(model);
+    ASSERT_NO_THROW(model.runPrompt("hello tok4 hello tok4"));
+    EXPECT_TRUE(model.hasRun());
+    EXPECT_EQ(model.kv_cache.getMaxSeqLen(), budget == 2 ? 5u : 8u);
+    EXPECT_EQ(model.kv_cache.getKeyCache(0).width(),
+              budget == 2 ? 8u * 8 : 4u * 8);
+    for (const auto &old : model.original_storage)
+      EXPECT_EQ(old.expired(), budget == 2);
+    for (size_t i = 5; i < 8; ++i)
+      EXPECT_EQ(model.tokenAt(i), 4u);
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(

@@ -336,6 +336,10 @@ protected:
   std::pair<Tensor, Tensor> createKVCachePlaceholders(const int layer_id,
                                                       int n_heads);
 
+  /** @brief Physical cache capacity; logical sequence/RoPE limits are separate.
+   */
+  virtual unsigned int initialKVCacheCapacity() const { return MAX_SEQ_LEN; }
+
   /**
    * @brief register CustomLayers
    */

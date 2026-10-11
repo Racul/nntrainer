@@ -20,13 +20,15 @@ import time
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
-# 1. 실행 옵션: 기본은 전체 측정, --check는 검사만, --resume은 중단 기록 재개
+# 1. 실행 옵션: 전체/선택 길이 측정, --check 검사, --resume 중단 기록 재개
 # ---------------------------------------------------------------------------
-parser = argparse.ArgumentParser(prog="snapkv_eval.sh", description="Linux CPU: 512/2048/4096 input tokens, "
-    "cache 4224, max decode 128, original sampling/EOS, 5 latency + 5 memory trials.")
+parser = argparse.ArgumentParser(prog="snapkv_eval.sh", description="Linux CPU: 512/1024/2048 input tokens, "
+    "cache 2176, max decode 128, original sampling/EOS, 5 latency + 5 memory trials.")
 parser.add_argument("model", nargs="?", help="directory containing the three model JSON files")
 parser.add_argument("--check", action="store_true", help="check inputs without running inference")
 parser.add_argument("--resume", type=Path, help="continue a matching interrupted evaluation")
+parser.add_argument("--contexts", type=int, nargs="+", choices=(512, 1024, 2048), default=[512, 1024, 2048],
+                    help="measure selected input lengths; cache capacity remains 2176 (repeat this option when resuming)")
 args = parser.parse_args()
 from tokenizers import Tokenizer
 
@@ -77,7 +79,7 @@ for key in ("model_file_name", "tokenizer_file", "embedding_file_name"):
 assert nntr["model_tensor_type"] == "FP32-FP32", "Expected the FP32 baseline model"
 assert not any(key in nntr for key in ("chat_input", "system_prompt")), "Use the plain benchmark input configuration"
 tokenizer = Tokenizer.from_file(nntr["tokenizer_file"])
-prompts = {str(n): tokenizer.decode([5555]) * n for n in (512, 2048, 4096)}
+prompts = {str(n): tokenizer.decode([5555]) * n for n in (512, 1024, 2048)}
 for n, prompt in prompts.items():
     assert len(tokenizer.encode(prompt, add_special_tokens=False).ids) == int(n), "Tokenizer length mismatch"
 assert sha(script) == "f075e1f0d535128da1d6c2e7dbc5827bf442ff5d3da01be3ca1232074a9d6b62", "mem_usage.sh changed"
@@ -107,8 +109,9 @@ if args.check:
 # 5. 측정 조건과 기록 준비: 원본 sampling/EOS 유지, 새 기록 생성 또는 재개
 #    재개 시 설정·모델·실행 파일·라이브러리 hash가 같아야 기존 값을 재사용한다.
 # ---------------------------------------------------------------------------
-protocol = dict(context_lengths=[512, 2048, 4096], max_seq_len=4224, max_decode_steps=128,
-    snapkv=dict(budget=256, window=16, kernel=5), cpu_affinity=cpus, batch_size=1,
+protocol = dict(context_lengths=sorted(set(args.contexts)), max_seq_len=2176, max_decode_steps=128,
+    snapkv=dict(budget=256, window=16, kernel=5, pooling="maxpool"), cpu_affinity=cpus, batch_size=1,
+    method="SnapKV query-head independent selection; expanded compressed cache with budget + decode capacity",
     latency_repetitions=5, memory_repetitions=5, generation_config=configs["generation_config.json"],
     binary_sha256={mode: sha(path) for mode, path in binaries.items()},
     model_weight_sha256=sha(Path(nntr["model_file_name"])), memory_script_sha256=sha(script))
@@ -131,6 +134,9 @@ else:
         kernel=command(["uname", "-a"]), cpu=command(["lscpu"]), compiler=command(["c++", "--version"]),
         build_options=options, env={k: env.get(k) for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NNTR_NUM_THREADS", "LD_LIBRARY_PATH")}),
         source_head_at_eval=command(["git", "-C", str(repo), "rev-parse", "HEAD"]),
+        runtime_source_sha256={str(path.relative_to(repo)): sha(path) for path in
+            [repo / "Applications/CausalLM" / name for name in
+             ("layers/snapkv.h", "layers/mha_core.h", "layers/mha_core.cpp", "models/causal_lm.h", "models/causal_lm.cpp", "models/transformer.h", "models/transformer.cpp")]},
         baseline_source_commit="2d1e4974ae84e1e6d37784416bdfb52b647919a6 (expected prebuilt baseline)",
         runtime_library_sha256=libraries, temperature="N/A", frequency="N/A", charging="N/A",
         quality="Not evaluated; agreed dataset, score and threshold are undefined", configs={}, commands={})
@@ -145,7 +151,7 @@ manifest.setdefault("invocations", []).append(dict(at=datetime.now().astimezone(
 def save():
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
 
-columns = "phase context mode trial position prefill_tokens generation_tokens early_eos prefill_ms prefill_tps generation_ms generation_tps total_ms e2e_ms os_peak_kib sampled_peak_kib samples target_pid duration_s started_at temperature frequency_unavailable valid failure log".split()
+columns = "phase context mode trial position prefill_tokens generation_tokens early_eos prefill_ms prefill_tps generation_ms generation_tps total_ms e2e_ms os_peak_kib kv_before_bytes kv_after_bytes kv_capacity sampled_peak_kib samples target_pid duration_s started_at temperature frequency_unavailable valid failure log".split()
 completed = {(r["phase"], int(r["context"]), r["mode"], int(r["trial"])) for r in rows}
 current = None
 signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
@@ -168,7 +174,7 @@ try:
             if (phase, context, mode, trial) in completed:
                 return
             # 7-1. 조건 준비: baseline에는 SnapKV 설정 없음, SnapKV에는 budget 256.
-            config = dict(nntr, init_seq_len=context, max_seq_len=4224, num_to_generate=128,
+            config = dict(nntr, init_seq_len=context, max_seq_len=protocol["max_seq_len"], num_to_generate=protocol["max_decode_steps"],
                           batch_size=1, sample_input=prompts[str(context)])
             config.pop("snapkv", None)
             if mode == "snapkv":
@@ -221,6 +227,18 @@ try:
                 failures.append("invalid generation count")
             if re.search(r"FATAL ERROR|truncat|heuristic|falling back", stdout + stderr, re.I):
                 failures.append("fatal/truncation/fallback marker")
+            if mode == "snapkv":
+                cache = re.search(r"^\[SnapKV cache\]: (\d+) -> (\d+) bytes, capacity (\d+) tokens", stdout, re.M)
+                architecture = configs["config.json"]
+                bytes_per_token = (2 * architecture["num_hidden_layers"] * architecture["num_key_value_heads"]
+                                   * architecture["head_dim"] * 2)
+                capacity = protocol["snapkv"]["budget"] + protocol["max_decode_steps"]
+                expanded_bytes = bytes_per_token * architecture["num_attention_heads"] // architecture["num_key_value_heads"]
+                expected = (bytes_per_token * protocol["max_seq_len"], expanded_bytes * capacity, capacity)
+                if not cache or tuple(map(int, cache.groups())) != expected:
+                    failures.append("KV allocation shrink missing or unexpected")
+                else:
+                    row.update(kv_before_bytes=int(cache[1]), kv_after_bytes=int(cache[2]), kv_capacity=int(cache[3]))
             # 7-4. 원본 mem_usage.sh의 PID·양수 RSS 표본·sampled peak를 확인.
             # 스크립트 exit code만으로 자식 추론의 성공을 판단하지 않는다.
             if phase == "memory":

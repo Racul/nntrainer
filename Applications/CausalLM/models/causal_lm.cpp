@@ -133,6 +133,7 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
   global_token_len = 0;
 
   snapkv_properties_.clear();
+  snapkv_budget_ = 0;
   if (nntr_cfg.contains("snapkv")) {
     const auto &settings = nntr_cfg.at("snapkv");
     if (!settings.is_object())
@@ -143,16 +144,35 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
                : fallback;
     };
     SnapKVConfig config{read("budget", 0), read("window", 16),
-                        read("kernel", 5)};
+                        read("kernel", 5),
+                        settings.value("pooling", std::string("avgpool"))};
     config.validate();
     if (config.budget) {
       if (cfg.value("model_type", std::string()) != "qwen3")
         throw std::invalid_argument("SnapKV currently supports Qwen3 only");
+      snapkv_budget_ = config.budget;
       snapkv_properties_ = {"snapkv_budget=" + std::to_string(config.budget),
                             "snapkv_window=" + std::to_string(config.window),
-                            "snapkv_kernel=" + std::to_string(config.kernel)};
+                            "snapkv_kernel=" + std::to_string(config.kernel),
+                            "snapkv_pooling=" + config.pooling};
     }
   }
+}
+
+unsigned int CausalLM::initialKVCacheCapacity() const {
+  if (!snapkv_budget_ ||
+      snapkv_budget_ >= static_cast<unsigned int>(MAX_SEQ_LEN))
+    return MAX_SEQ_LEN;
+  // The graph's raw-input descriptor must accommodate both the original Hkv
+  // layout and the compressed Hq layout, including the reserved decode rows.
+  const uint64_t rows =
+    ((static_cast<uint64_t>(snapkv_budget_) + NUM_TO_GENERATE) * NUM_HEADS +
+     NUM_KEY_VALUE_HEADS - 1) /
+    NUM_KEY_VALUE_HEADS;
+  if (rows > std::numeric_limits<unsigned int>::max())
+    throw std::out_of_range("SnapKV cache capacity overflow");
+  return std::max(static_cast<unsigned int>(MAX_SEQ_LEN),
+                  static_cast<unsigned int>(rows));
 }
 
 void CausalLM::allocateAndBindKVCache() {
@@ -165,7 +185,7 @@ void CausalLM::allocateAndBindKVCache() {
     const auto cache_dtype = ml::train::TensorDim::DataType::UINT16;
 #endif
 
-    const unsigned int max_timestep = static_cast<unsigned int>(MAX_SEQ_LEN);
+    const unsigned int max_timestep = initialKVCacheCapacity();
 
     kv_cache.allocate(static_cast<unsigned int>(NUM_LAYERS), BATCH_SIZE,
                       max_timestep,
@@ -219,11 +239,58 @@ void CausalLM::allocateAndBindKVCache() {
       << "allocateAndBindKVCache: cache placeholder dtype mismatch for layer "
       << i;
 
-    kp->setData(kc.getMemoryData(), kc.getOffset(), false);
-    vp->setData(vc.getMemoryData(), vc.getOffset(), false);
+    auto bind = [](nntrainer::Tensor *view, const nntrainer::Tensor &cache) {
+      if (view->getDim() != cache.getDim()) {
+        // Keep the TensorBase object and its dependent views alive. Updating
+        // dimensions alone does not recompute strides, hence reshape as well.
+        view->setData(nullptr);
+        view->updateDimension(cache.getDim());
+        view->reshape(cache.getDim());
+      }
+      view->setData(cache.getMemoryData(), cache.getOffset(), false);
+    };
+    bind(kp, kc);
+    bind(vp, vc);
+    if (snapkv_budget_) {
+      // Resize both sides of the external input layer as well as the MHA
+      // consumer, so no copy or cache view spans the old full allocation.
+      for (const auto &entry : {std::make_pair("cache_k_l", &kc),
+                                std::make_pair("cache_v_l", &vc)}) {
+        for (const auto &suffix : {":input0", ":out0"}) {
+          auto *view =
+            model->getTensor(entry.first + std::to_string(i) + suffix);
+          if (view)
+            bind(view, *entry.second);
+        }
+      }
+    }
   }
 
   kv_cache_bound = true;
+}
+
+void CausalLM::shrinkSnapKVCache() {
+  // Like SnapKVCluster.update_kv(), replace the full prompt cache with the
+  // selected K/V. Reserve decode space once instead of torch.cat per token.
+  KVCacheManager compact;
+  compact.allocate(
+    static_cast<unsigned int>(NUM_LAYERS), BATCH_SIZE,
+    snapkv_budget_ + NUM_TO_GENERATE, static_cast<unsigned int>(NUM_HEADS),
+    static_cast<unsigned int>(HEAD_DIM), kv_cache.getKeyCache(0).getDataType());
+  for (int i = 0; i < NUM_LAYERS; ++i) {
+    auto &key = kv_cache.getKeyCache(i);
+    auto &value = kv_cache.getValueCache(i);
+    const size_t bytes =
+      compact.getKeyCache(i).bytes() / compact.getMaxSeqLen() * snapkv_budget_;
+    if (bytes > key.bytes() || bytes > value.bytes())
+      throw std::runtime_error("SnapKV compressed head-wise cache missing");
+    std::memcpy(compact.getKeyCache(i).getData(), key.getData(), bytes);
+    std::memcpy(compact.getValueCache(i).getData(), value.getData(), bytes);
+  }
+  compact.setPosition(snapkv_budget_);
+  kv_cache = std::move(compact);
+  kv_cache_bound = false;
+  allocateAndBindKVCache();
 }
 
 void CausalLM::setKVCachePosition(unsigned int pos) {
@@ -647,6 +714,14 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
     delete[] out;
   }
 
+  size_t snapkv_cache_before = 0;
+  if (snapkv_budget_ && init_len > snapkv_budget_) {
+    snapkv_cache_before =
+      2 * static_cast<size_t>(NUM_LAYERS) * kv_cache.getKeyCache(0).bytes();
+    shrinkSnapKVCache();
+    input = build_inference_inputs();
+  }
+
   auto finish_prefill = std::chrono::high_resolution_clock::now();
   auto prefill_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
     finish_prefill - start_prefill);
@@ -747,6 +822,12 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
               << " TPS\n";
     std::cout << "total: " << total_duration.count() << " ms\n";
     std::cout << "peak memory: " << peak_memory << " KB\n";
+    if (snapkv_cache_before)
+      std::cout << "[SnapKV cache]: " << snapkv_cache_before << " -> "
+                << 2 * static_cast<size_t>(NUM_LAYERS) *
+                     kv_cache.getKeyCache(0).bytes()
+                << " bytes, capacity " << kv_cache.getMaxSeqLen()
+                << " tokens\n";
     std::cout << "==========================================================\n";
   }
 

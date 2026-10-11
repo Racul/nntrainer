@@ -2,7 +2,9 @@
 /**
  * @file snapkv.h
  * @date 11 October 2026
- * @brief Prompt KV selection with observation-window votes shared per KV head
+ * @brief Head-wise prompt KV selection following SnapKVCluster.update_kv
+ * @note C++ adaptation of FasterDecoding/SnapKV (Apache-2.0), commit e216ddc8,
+ *       snapkv/monkeypatch/snapkv_utils.py and llama_hijack_4_37.py.
  */
 
 #ifndef __CAUSALLM_SNAPKV_H__
@@ -27,6 +29,7 @@ struct SnapKVConfig {
   unsigned int budget = 0;
   unsigned int window = 16;
   unsigned int kernel = 5;
+  std::string pooling = "avgpool";
 
   /** @brief Parse a nonnegative integer without truncation or wraparound. */
   static unsigned int parseUnsigned(const std::string &value) {
@@ -41,25 +44,50 @@ struct SnapKVConfig {
 
   /** @brief A zero budget disables SnapKV. */
   void validate() const {
-    if (budget && (!window || window >= budget || !kernel || !(kernel % 2)))
+    if (budget && (!window || window >= budget || !kernel || !(kernel % 2) ||
+                   (pooling != "avgpool" && pooling != "maxpool")))
       throw std::invalid_argument(
-        "SnapKV requires 0 < window < budget and an odd positive kernel");
+        "SnapKV requires 0 < window < budget, an odd positive kernel, and "
+        "avgpool or maxpool");
   }
 };
 
 /**
  * @brief Layer-local single-prompt compression. Absolute RoPE positions remain
- * unchanged. GQA query-head votes are averaged within each KV head; this
- * differs from the original SnapKV implementation's independently expanded
- * query heads. Cache allocation and tensor shapes are preserved.
+ * unchanged. Each query head independently selects prompt positions, including
+ * GQA heads sharing the original K/V. The host reserves decode space after
+ * prefill and releases the full prompt cache.
  */
 class SnapKVState {
 public:
   bool enabled() const { return config_.budget != 0; }
+  bool compressed() const { return removed_tokens_ != 0; }
+
+  /** @brief Repeat a newly appended GQA token after applying its absolute RoPE.
+   * The original KV heads occupy the start of the expanded single-token row.
+   */
+  static void repeatKV(nntrainer::Tensor &step, unsigned int heads_kv,
+                       unsigned int head_dim) {
+    if (!head_dim || !heads_kv || step.width() % head_dim)
+      throw std::invalid_argument("SnapKV repeatKV head shape mismatch");
+    const unsigned int heads_q = step.width() / head_dim;
+    if (step.height() != 1 || !heads_q || heads_q % heads_kv)
+      throw std::invalid_argument("SnapKV repeatKV requires one GQA token");
+    const size_t head_bytes = step.bytes() / heads_q;
+    auto *data = step.getData<unsigned char>();
+    const unsigned int group = heads_q / heads_kv;
+    for (unsigned int head = heads_q; head-- > 0;)
+      std::memmove(data + head * head_bytes, data + (head / group) * head_bytes,
+                   head_bytes);
+  }
 
   /** @brief Consume settings, with prompt_length last to start a new session.
    */
   bool consumeProperty(const std::string &key, const std::string &value) {
+    if (key == "snapkv_pooling") {
+      config_.pooling = value;
+      return true;
+    }
     if (key != "snapkv_budget" && key != "snapkv_window" &&
         key != "snapkv_kernel" && key != "snapkv_prompt_length")
       return false;
@@ -91,8 +119,10 @@ public:
         step_size != (prompt_finished_ ? 1u : prompt_length_))
       throw std::invalid_argument("SnapKV requires one full prefill followed "
                                   "by consecutive single tokens");
-    const auto limit = std::min(capacity, max_position);
-    if (logical_from > limit || step_size > limit - logical_from)
+    const auto physical_from = physicalPosition(logical_from);
+    if (logical_from > max_position ||
+        step_size > max_position - logical_from || physical_from > capacity ||
+        step_size > capacity - physical_from)
       throw std::out_of_range("SnapKV step exceeds sequence or RoPE capacity");
   }
 
@@ -113,7 +143,10 @@ public:
                   unsigned int head_dim) {
     if (!enabled())
       return;
-    checkStep(logical_from, step_size, key.height(), key.height());
+    // The caller already checked the absolute RoPE limit. Cache capacity is
+    // physical and can be smaller than the absolute position after eviction.
+    checkStep(logical_from, step_size, key.height(),
+              std::numeric_limits<unsigned int>::max());
     if (!prompt_finished_ && prompt_length_ > config_.budget) {
       compress(probabilities, key, value, heads_q, heads_kv, head_dim);
       removed_tokens_ = prompt_length_ - config_.budget;
@@ -135,18 +168,21 @@ private:
     throw std::invalid_argument("SnapKV requires FP32 or FP16 probabilities");
   }
 
-  /** @brief Move one head in ascending source order, preserving K/V bitwise. */
-  static void compactHead(nntrainer::Tensor &cache,
-                          const std::vector<unsigned int> &positions,
-                          unsigned int head, unsigned int head_dim,
-                          size_t element_size) {
-    auto *data = cache.getData<unsigned char>();
-    const size_t row_bytes = cache.width() * element_size;
+  /** @brief Gather one query head from its original shared KV head. */
+  static void gatherHead(const nntrainer::Tensor &source,
+                         nntrainer::Tensor &destination,
+                         const std::vector<unsigned int> &positions,
+                         unsigned int head, unsigned int group,
+                         unsigned int head_dim, size_t element_size) {
+    const auto *src = source.getData<unsigned char>();
+    auto *dst = destination.getData<unsigned char>();
     const size_t head_bytes = head_dim * element_size;
-    for (size_t dst = 0; dst < positions.size(); ++dst)
-      std::memmove(data + dst * row_bytes + head * head_bytes,
-                   data + positions[dst] * row_bytes + head * head_bytes,
-                   head_bytes);
+    for (size_t row = 0; row < positions.size(); ++row)
+      std::memcpy(dst + row * destination.width() * element_size +
+                    head * head_bytes,
+                  src + positions[row] * source.width() * element_size +
+                    (head / group) * head_bytes,
+                  head_bytes);
   }
 
   void compress(const nntrainer::Tensor &probs, nntrainer::Tensor &key,
@@ -174,17 +210,29 @@ private:
     std::vector<float> votes(prefix), pooled(prefix);
     std::vector<unsigned int> indices(prefix), positions(config_.budget);
 
-    for (unsigned int head = 0; head < heads_kv; ++head) {
+    auto compact_dim = key.getDim();
+    compact_dim.height(config_.budget);
+    compact_dim.width(heads_q * head_dim);
+    if (compact_dim.getDataLen() > key.size())
+      throw std::invalid_argument(
+        "SnapKV prompt storage cannot stage expanded heads");
+    nntrainer::Tensor compact_key(compact_dim, true);
+    nntrainer::Tensor compact_value(compact_dim, true);
+    // Equivalent to repeat_kv -> per-query-head gather, without materializing
+    // an expanded full-length prompt cache.
+    for (unsigned int head = 0; head < heads_q; ++head) {
       std::fill(votes.begin(), votes.end(), 0.0f);
       for (size_t q = prefix; q < length; ++q) {
         const size_t row = q * (q + 1) / 2;
         for (unsigned int j = 0; j < prefix; ++j)
-          for (unsigned int g = 0; g < group; ++g)
-            votes[j] +=
-              probability(probs, (row + j) * heads_q + head * group + g);
+          votes[j] += probability(probs, (row + j) * heads_q + head);
       }
       for (auto &vote : votes) {
-        vote /= group;
+#ifdef ENABLE_FP16
+        // torch.sum returns the input dtype after accumulation.
+        if (probs.getDataType() == DType::FP16)
+          vote = static_cast<float>(static_cast<_FP16>(vote));
+#endif
         if (!std::isfinite(vote))
           throw std::invalid_argument(
             "SnapKV received nonfinite attention votes");
@@ -194,20 +242,44 @@ private:
         const size_t start = j > radius ? j - radius : 0;
         const size_t end = std::min<size_t>(prefix, j + radius + 1);
         pooled[j] =
-          *std::max_element(votes.begin() + start, votes.begin() + end);
+          config_.pooling == "maxpool"
+            ? *std::max_element(votes.begin() + start, votes.begin() + end)
+            : std::accumulate(votes.begin() + start, votes.begin() + end,
+                              0.0f) /
+                config_.kernel; // avg_pool1d includes padded zeros
+#ifdef ENABLE_FP16
+        if (probs.getDataType() == DType::FP16)
+          pooled[j] = static_cast<float>(static_cast<_FP16>(pooled[j]));
+#endif
       }
       std::iota(indices.begin(), indices.end(), 0u);
-      std::partial_sort(indices.begin(), indices.begin() + keep_prefix,
-                        indices.end(), [&](unsigned int a, unsigned int b) {
-                          return pooled[a] == pooled[b] ? a < b
-                                                        : pooled[a] > pooled[b];
-                        });
-      std::sort(indices.begin(), indices.begin() + keep_prefix);
+      const auto greater = [&](unsigned int a, unsigned int b) {
+        return pooled[a] > pooled[b];
+      };
+      // Follow torch.topk's CPU partition/sort strategy, retaining score order.
+      // Tied indices are not guaranteed across PyTorch backends/platforms.
+      if (static_cast<size_t>(keep_prefix) * 64 <= prefix) {
+        std::partial_sort(indices.begin(), indices.begin() + keep_prefix,
+                          indices.end(), greater);
+      } else {
+        std::nth_element(indices.begin(), indices.begin() + keep_prefix - 1,
+                         indices.end(), greater);
+        std::sort(indices.begin(), indices.begin() + keep_prefix - 1, greater);
+      }
       std::copy_n(indices.begin(), keep_prefix, positions.begin());
       std::iota(positions.begin() + keep_prefix, positions.end(), prefix);
-      compactHead(key, positions, head, head_dim, element_size);
-      compactHead(value, positions, head, head_dim, element_size);
+      gatherHead(key, compact_key, positions, head, group, head_dim,
+                 element_size);
+      gatherHead(value, compact_value, positions, head, group, head_dim,
+                 element_size);
     }
+    // Stage the gathered Hq rows in the host-owned slab. NNTrainer clears
+    // external input bindings after prefill; changing only those views would
+    // lose the new buffer. The host copies this packed prefix into the small
+    // Hq cache and rebinds all views before the next attention call.
+    std::memcpy(key.getData(), compact_key.getData(), compact_key.bytes());
+    std::memcpy(value.getData(), compact_value.getData(),
+                compact_value.bytes());
   }
 
   SnapKVConfig config_;

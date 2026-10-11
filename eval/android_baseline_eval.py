@@ -2,7 +2,7 @@
 """Evaluate an already deployed Android baseline model.
 
 run/memory/both use current settings. sweep temporarily prepares 512/1024/2048
-input tokens, max decode 128, batch 1, cache 4224, and runs each phase five times.
+input tokens, max decode 128, batch 1, cache 2176, and runs each phase five times.
 sweep requires the existing tokenizers package; sampling/EOS remain unchanged.
 The original device config is backed up and restored, including on errors.
 This project helper is separate from the README's benchmark_android.py CLI.
@@ -238,7 +238,7 @@ def main(variant="baseline"):
     parser.add_argument("--interval", type=float, default=1, help="seconds between trials (default: 1; sweep also cools between contexts)")
     parser.add_argument("--prompts", default="512,1024,2048", help="sweep input token counts, comma-separated (default: 512,1024,2048)")
     parser.add_argument("--n-gen", type=int, default=128, help="sweep maximum decode steps (sampling/EOS unchanged)")
-    parser.add_argument("--max-seq-len", type=int, default=4224, help="sweep cache capacity")
+    parser.add_argument("--max-seq-len", type=int, default=2176, help="sweep cache capacity")
     parser.add_argument("--cool-to", type=float, default=35, help="sweep cooling threshold between contexts, thermal_zone0 C")
     parser.add_argument("--max-cool-wait", type=int, default=300, help="maximum seconds for cooling between contexts")
     parser.add_argument("--output", type=Path, help=f"new result directory (default: logs/android_{variant}/<timestamp>)")
@@ -247,6 +247,7 @@ def main(variant="baseline"):
         parser.add_argument("--budget", type=int, default=256, help="retained prompt tokens, including observation window")
         parser.add_argument("--window", type=int, default=16, help="observation window")
         parser.add_argument("--kernel", type=int, default=5, help="odd positive pooling kernel")
+        parser.add_argument("--pooling", choices=("avgpool", "maxpool"), default="maxpool", help="SnapKV pooling (default: maxpool)")
     args = parser.parse_args()
     sweep = args.mode == "sweep"
     args.repeat = args.repeat if args.repeat is not None else (5 if sweep else 1)
@@ -265,7 +266,7 @@ def main(variant="baseline"):
     if is_snapkv:
         if not 0 < args.window < args.budget < min(args.prompts) or args.kernel < 1 or not args.kernel % 2:
             parser.error("SnapKV requires 0 < window < budget < all prompt lengths and an odd positive kernel")
-        snapkv = dict(budget=args.budget, window=args.window, kernel=args.kernel)
+        snapkv = dict(budget=args.budget, window=args.window, kernel=args.kernel, pooling=args.pooling)
     if not args.model.startswith(DEVICE_DIR + "/") or ".." in PurePosixPath(args.model).parts:
         parser.error("--model must be an absolute Android path under " + DEVICE_DIR)
 
