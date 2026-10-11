@@ -44,6 +44,7 @@
 #include <transformer.h>
 
 #include <atomic>
+#include <vector>
 
 extern "C" {
 struct BaseStreamer;
@@ -202,6 +203,7 @@ protected:
   bool USE_KVCACHE;
   bool SKIP_PREFILL;
   unsigned int global_token_len;
+  std::vector<std::string> snapkv_properties_; /**< Empty when disabled */
 
   std::mt19937 rng; /**< Random Number Gen */
 

@@ -131,6 +131,28 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
                   ? generation_cfg["temperature"].get<float>()
                   : 0.7;
   global_token_len = 0;
+
+  snapkv_properties_.clear();
+  if (nntr_cfg.contains("snapkv")) {
+    const auto &settings = nntr_cfg.at("snapkv");
+    if (!settings.is_object())
+      throw std::invalid_argument("snapkv must be a JSON object");
+    const auto read = [&](const char *name, unsigned int fallback) {
+      return settings.contains(name)
+               ? SnapKVConfig::parseUnsigned(settings.at(name).dump())
+               : fallback;
+    };
+    SnapKVConfig config{read("budget", 0), read("window", 16),
+                        read("kernel", 5)};
+    config.validate();
+    if (config.budget) {
+      if (cfg.value("model_type", std::string()) != "qwen3")
+        throw std::invalid_argument("SnapKV currently supports Qwen3 only");
+      snapkv_properties_ = {"snapkv_budget=" + std::to_string(config.budget),
+                            "snapkv_window=" + std::to_string(config.window),
+                            "snapkv_kernel=" + std::to_string(config.kernel)};
+    }
+  }
 }
 
 void CausalLM::allocateAndBindKVCache() {
@@ -368,6 +390,11 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
                              "initialize() before run().");
   }
 
+  if (!snapkv_properties_.empty() &&
+      (BATCH_SIZE != 1 || SKIP_PREFILL || USE_KVCACHE || global_token_len != 0))
+    throw std::invalid_argument("SnapKV requires a fresh batch-one run without "
+                                "skipped or cached prefill");
+
   struct StreamerEndGuard {
     BaseStreamer *streamer;
     ~StreamerEndGuard() { streamer_end(streamer); }
@@ -467,6 +494,26 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   _input.clear();
 
   unsigned int init_len = init_input.size();
+  if (!snapkv_properties_.empty()) {
+    if (!init_len || static_cast<uint64_t>(init_len) + NUM_TO_GENERATE >
+                       std::min<uint64_t>(MAX_SEQ_LEN, MAX_POSITION_EMBEDDINGS))
+      throw std::invalid_argument(
+        "SnapKV prompt/generation exceeds sequence limits");
+    auto properties = snapkv_properties_;
+    properties.push_back("snapkv_prompt_length=" + std::to_string(init_len));
+    unsigned int layers = 0;
+    model->forEachLayer(
+      [&](ml::train::Layer &layer, nntrainer::RunLayerContext &, void *) {
+        if (layer.getType() == MHACoreLayer::type) {
+          layer.setProperty(properties);
+          ++layers;
+        }
+      },
+      nullptr);
+    if (layers != static_cast<unsigned int>(NUM_LAYERS))
+      throw std::invalid_argument(
+        "SnapKV requires an MHA cache in every layer");
+  }
   float *input_sample =
     (float *)malloc(sizeof(float) * BATCH_SIZE * MAX_SEQ_LEN);
   std::vector<bool> eos_list(BATCH_SIZE, false);

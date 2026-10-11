@@ -287,6 +287,14 @@ void MHACoreLayer::finalize(nntrainer::InitLayerContext &context) {
  */
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
+  if (snapkv_.enabled() &&
+      (training || !use_external_cache || !is_causal || use_sink ||
+       skip_prefill || local_window_size != UINT_MAX ||
+       context.getInput(INOUT_INDEX::QUERY).batch() != 1))
+    throw std::invalid_argument(
+      "SnapKV requires batch-one full causal inference with external cache, "
+      "without sinks, sliding windows or skipped prefill");
+
   if (!use_external_cache) {
     return;
   }
@@ -406,6 +414,8 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
 void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
                                           unsigned int _from, unsigned int _to,
                                           bool training) {
+  if (snapkv_.enabled() && (!use_external_cache || _to <= _from))
+    throw std::invalid_argument("Invalid SnapKV external cache step");
   // External KV cache path: from/to are interpreted as the absolute write
   // position; route through forwarding() which reads cache_key/cache_value
   // from input slots 3/4. forwarding() advances cache_index internally.
@@ -700,6 +710,11 @@ void MHACoreLayer::one_batch_incremental_forwarding(
   ml::train::TensorDim &cache_value_dim,
   ml::train::TensorDim &cache_value_step_dim) {
 
+  const unsigned int step_size = to - from;
+  snapkv_.checkStep(cache_index, step_size, cache_key_dim.height(),
+                    max_position_embeddings);
+  const unsigned int physical_from = snapkv_.physicalPosition(cache_index);
+
   /**
    *
    *  cache_key
@@ -711,14 +726,15 @@ void MHACoreLayer::one_batch_incremental_forwarding(
    */
 
   // Load Input Tensors of this batch : b_ denotes a Tensor for this batch
-  nntrainer::Tensor b_cache_key_step = cache_key.getSharedDataTensor(
-    cache_key_step_dim,
-    batch * cache_key_dim.getFeatureLen() + cache_index * cache_key_dim.width(),
-    true);
+  nntrainer::Tensor b_cache_key_step =
+    cache_key.getSharedDataTensor(cache_key_step_dim,
+                                  batch * cache_key_dim.getFeatureLen() +
+                                    physical_from * cache_key_dim.width(),
+                                  true);
   nntrainer::Tensor b_cache_value_step =
     cache_value.getSharedDataTensor(cache_value_step_dim,
                                     batch * cache_value_dim.getFeatureLen() +
-                                      cache_index * cache_value_dim.width(),
+                                      physical_from * cache_value_dim.width(),
                                     true);
 
   // append kcache with or without rotary embedding
@@ -737,7 +753,6 @@ void MHACoreLayer::one_batch_incremental_forwarding(
 #endif
   }
 
-  unsigned int step_size = to - from;
   bool is_prefill = !from || step_size > 1;
   if (skip_prefill && is_prefill)
     return;
@@ -749,7 +764,7 @@ void MHACoreLayer::one_batch_incremental_forwarding(
   }
 
   /// @todo replace step_size into input height
-  unsigned int cache_from = cache_index;
+  unsigned int cache_from = physical_from;
   unsigned int cache_to = cache_from + step_size;
 
   ml::train::TensorDim cached_key_dim = cache_key_dim;
@@ -779,6 +794,9 @@ void MHACoreLayer::one_batch_incremental_forwarding(
   compute_fp16vcache_transposed(out_, b_cached_value, attention_output_step,
                                 cache_from, num_heads_KV, gqa_size, head_dim,
                                 cache_to);
+
+  snapkv_.finishStep(out_, cache_key, cache_value, cache_index, step_size,
+                     num_heads_Q, num_heads_KV, head_dim);
 }
 
 void MHACoreLayer::one_batch_incremental_forwarding(
@@ -1555,9 +1573,12 @@ void MHACoreLayer::setProperty(const std::vector<std::string> &values) {
   for (const auto &value : values) {
     std::string key;
     std::string parsed_value;
-    if (nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE &&
-        key == "cache_index") {
+    const bool parsed =
+      nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE;
+    if (parsed && key == "cache_index") {
       setCacheIndex(static_cast<unsigned int>(std::stoul(parsed_value)));
+    } else if (parsed && snapkv_.consumeProperty(key, parsed_value)) {
+      continue;
     } else {
       props.push_back(value);
     }

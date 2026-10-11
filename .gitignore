@@ -4,6 +4,9 @@
 # ignore build directory
 /build
 /builddir
+/.venv/
+/models/
+/logs/
 .cache/
 .idea/
 

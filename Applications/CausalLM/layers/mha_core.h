@@ -40,6 +40,7 @@
 #include <cpu_backend.h>
 #include <layer_impl.h>
 #include <limits.h>
+#include <snapkv.h>
 #include <util_simd.h>
 
 #include <string>
@@ -352,7 +353,9 @@ private:
   nntrainer::ActiFunc sm;
 
   float epsilon;            /** to avoid overflow */
-  unsigned int cache_index; /** idx of kv cache */
+  unsigned int
+    cache_index;       /** logical token position, including evicted tokens */
+  SnapKVState snapkv_; /** optional prompt compression, local to this layer */
 
   /**
    * @brief Whether to use externally provided cache tensors
