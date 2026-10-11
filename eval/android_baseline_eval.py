@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Evaluate an already deployed Android baseline model.
 
-run/memory/both use current settings. sweep temporarily prepares 512/2048/4096
+run/memory/both use current settings. sweep temporarily prepares 512/1024/2048
 input tokens, max decode 128, batch 1, cache 4224, and runs each phase five times.
 sweep requires the existing tokenizers package; sampling/EOS remain unchanged.
 The original device config is backed up and restored, including on errors.
@@ -220,22 +220,33 @@ def summarize(trials):
     return summary
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("mode", nargs="?", choices=("check", "run", "memory", "both", "sweep"), default="check")
+def main(variant="baseline"):
+    is_snapkv = variant == "snapkv"
+    description = __doc__ if not is_snapkv else (
+        "Android SnapKV evaluation using the same protocol as android_baseline_eval.\n"
+        "sweep: 512/1024/2048 tokens, max decode 128, latency 5 + memory 5 per context.\n"
+        "SnapKV defaults: budget 256, window 16, kernel 5. Original settings are restored.\n"
+        "Requires a deployed SnapKV Android build; this script does not build or install it.")
+    parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter)
+    modes = ("check", "sweep") if is_snapkv else ("check", "run", "memory", "both", "sweep")
+    parser.add_argument("mode", nargs="?", choices=modes, default="check")
     parser.add_argument("--check", action="store_true", help="only inspect the device; no inference or output directory")
     parser.add_argument("--adb", default=os.environ.get("ADB_EXE"), help="ADB executable; Windows adb.exe preferred in WSL")
     parser.add_argument("--serial", default=os.environ.get("ANDROID_SERIAL"))
     parser.add_argument("--model", default=DEVICE_DIR + "/models/qwen3-fp32", help="existing Android model directory")
     parser.add_argument("--repeat", type=int, help="trials per phase/context (default: sweep 5, otherwise 1; warm-up 0)")
     parser.add_argument("--interval", type=float, default=1, help="seconds between trials (default: 1; sweep also cools between contexts)")
-    parser.add_argument("--prompts", default="512,2048,4096", help="sweep input token counts, comma-separated")
+    parser.add_argument("--prompts", default="512,1024,2048", help="sweep input token counts, comma-separated (default: 512,1024,2048)")
     parser.add_argument("--n-gen", type=int, default=128, help="sweep maximum decode steps (sampling/EOS unchanged)")
     parser.add_argument("--max-seq-len", type=int, default=4224, help="sweep cache capacity")
     parser.add_argument("--cool-to", type=float, default=35, help="sweep cooling threshold between contexts, thermal_zone0 C")
     parser.add_argument("--max-cool-wait", type=int, default=300, help="maximum seconds for cooling between contexts")
-    parser.add_argument("--output", type=Path, help="new result directory (default: logs/android_baseline/<timestamp>)")
-    parser.add_argument("--expected-binary-sha256", help="optional trusted baseline executable hash to verify")
+    parser.add_argument("--output", type=Path, help=f"new result directory (default: logs/android_{variant}/<timestamp>)")
+    parser.add_argument("--expected-binary-sha256", help="optional trusted executable hash to verify")
+    if is_snapkv:
+        parser.add_argument("--budget", type=int, default=256, help="retained prompt tokens, including observation window")
+        parser.add_argument("--window", type=int, default=16, help="observation window")
+        parser.add_argument("--kernel", type=int, default=5, help="odd positive pooling kernel")
     args = parser.parse_args()
     sweep = args.mode == "sweep"
     args.repeat = args.repeat if args.repeat is not None else (5 if sweep else 1)
@@ -250,6 +261,11 @@ def main():
         parser.error("--repeat must be positive and --interval nonnegative")
     if not math.isfinite(args.cool_to) or not 0 < args.cool_to < 150 or args.max_cool_wait < 0:
         parser.error("--cool-to must be in (0, 150) and --max-cool-wait nonnegative")
+    snapkv = None
+    if is_snapkv:
+        if not 0 < args.window < args.budget < min(args.prompts) or args.kernel < 1 or not args.kernel % 2:
+            parser.error("SnapKV requires 0 < window < budget < all prompt lengths and an odd positive kernel")
+        snapkv = dict(budget=args.budget, window=args.window, kernel=args.kernel)
     if not args.model.startswith(DEVICE_DIR + "/") or ".." in PurePosixPath(args.model).parts:
         parser.error("--model must be an absolute Android path under " + DEVICE_DIR)
 
@@ -257,8 +273,15 @@ def main():
     model = args.model.rstrip("/")
     configs = read_configs(adb, model)
     config = configs["nntr_config.json"]
-    if config.get("snapkv"):
+    if not is_snapkv and config.get("snapkv"):
         raise RuntimeError("The device config enables SnapKV; select the baseline model config.")
+    if is_snapkv:
+        if configs["config.json"].get("model_type") != "qwen3":
+            raise RuntimeError("The current SnapKV implementation supports Qwen3 only")
+        support = adb.shell(f"strings {DEVICE_DIR}/libcausallm_core.so | grep -c -F snapkv_prompt_length || true")
+        if not support.isdigit() or int(support) == 0:
+            raise RuntimeError("The deployed libcausallm_core.so has no SnapKV support. "
+                               "Build Applications/CausalLM/build_android.sh --cache and deploy the artifacts first.")
     # Use the installer's wrapper unchanged. It fixes NNTR_NUM_THREADS at four.
     wrapper = adb.shell("cat " + DEVICE_DIR + "/run_causallm.sh")
     if "export NNTR_NUM_THREADS=4" not in wrapper:
@@ -269,19 +292,22 @@ def main():
         raise RuntimeError("Deployed executable differs from the expected baseline hash.")
     print(f"Device: {adb.serial}\nADB: {adb.executable}\nModel: {model}\nBinary SHA256: {binary_sha}")
     print(json.dumps(config, ensure_ascii=False, indent=2))
-    prepared, tokenizer_sha = prepare_sweep(adb, model, config, args) if sweep else ({None: config}, None)
+    input_config = dict(config, snapkv=snapkv) if is_snapkv else config
+    prepared, tokenizer_sha = prepare_sweep(adb, model, input_config, args) if sweep or is_snapkv else ({None: config}, None)
     print(f"NNTR/OMP=4, warm-up=0, repetitions={args.repeat}; quality not evaluated.")
     if sweep:
         print(f"Sweep prompts={args.prompts}, max decode={args.n_gen}, cache={args.max_seq_len}; sampling/EOS unchanged.")
+    if is_snapkv:
+        print("SnapKV:", snapkv)
     if args.mode == "check" or args.check:
         print("Preflight passed. A source checkout alone does not prove the deployed binary revision.")
         return 0
 
-    out = (args.output or REPO / "logs/android_baseline" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")).resolve()
+    out = (args.output or REPO / f"logs/android_{variant}" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")).resolve()
     out.mkdir(parents=True, exist_ok=False)
     manifest_path = out / "results.json"
     manifest = dict(started_at=datetime.now().astimezone().isoformat(), status="PREPARING",
-                    invocation=sys.argv, python_version=sys.version,
+                    variant=variant, snapkv=snapkv, invocation=sys.argv, python_version=sys.version,
                     adb=adb.executable, serial=adb.serial, model=model, configs=configs,
                     binary_sha256=binary_sha, expected_binary_sha256=args.expected_binary_sha256,
                     binary_revision="Not inferred from the host checkout; verify build provenance separately",
@@ -325,6 +351,8 @@ def main():
             manifest["host_build_options_unverified"] = json.loads(build_options.read_text())
         manifest["run_wrapper"] = wrapper
         manifest["evaluation_script_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        if is_snapkv:
+            manifest["entry_script_sha256"] = hashlib.sha256((REPO / "eval/android_snapkv_eval.py").read_bytes()).hexdigest()
         phases = ("run", "memory") if args.mode in ("both", "sweep") else (args.mode,)
         if "memory" in phases:
             script_sha = hashlib.sha256(MEMORY_SCRIPT.read_bytes()).hexdigest()
@@ -431,16 +459,20 @@ def main():
     return 0 if manifest["status"] == "COMPLETE" else 1
 
 
-if __name__ == "__main__":
+def cli(variant="baseline"):
     def terminate(_signum, _frame):
         raise KeyboardInterrupt()
 
     signal.signal(signal.SIGTERM, terminate)
     try:
-        sys.exit(main())
+        sys.exit(main(variant))
     except KeyboardInterrupt:
         print("Interrupted. Inspect device processes before retrying.", file=sys.stderr)
         sys.exit(130)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print("Error:", error, file=sys.stderr)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    cli()
