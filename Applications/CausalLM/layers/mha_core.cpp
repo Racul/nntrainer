@@ -1313,6 +1313,15 @@ void MHACoreLayer::ensure_rope_flat_lut() {
  */
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
+  if (h2o_.enabled() &&
+      (training || !use_external_cache || !is_causal || use_sink ||
+       skip_prefill || local_window_size != UINT_MAX || kv_ring_cap ||
+       kv_int8 || nntr_engine_env() != "cpu" ||
+       context.getInput(INOUT_INDEX::QUERY).batch() != 1))
+    throw std::invalid_argument(
+      "H2O requires batch-one full causal CPU inference with external cache, "
+      "without sinks, sliding windows, rings, int8 KV or skipped prefill");
+
   if (!use_external_cache) {
     // 3/4-input (internal KV cache) mode: full-sequence self-attention.
     //
@@ -1490,6 +1499,8 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
 void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
                                           unsigned int _from, unsigned int _to,
                                           bool training) {
+  if (h2o_.enabled() && (!use_external_cache || _to <= _from))
+    throw std::invalid_argument("Invalid H2O external cache step");
   // External KV cache path: from/to are interpreted as the absolute write
   // position; route through forwarding() which reads cache_key/cache_value
   // from input slots 3/4. forwarding() advances cache_index internally.
@@ -1979,6 +1990,37 @@ void MHACoreLayer::one_batch_incremental_forwarding(
   ml::train::TensorDim &cache_key_step_dim,
   ml::train::TensorDim &cache_value_dim,
   ml::train::TensorDim &cache_value_step_dim) {
+
+  if (h2o_.enabled()) {
+    const unsigned int step = to - from;
+    const bool use_rope = theta > 0.0f;
+    h2o_.forwardStep(
+      query_step, cache_key, cache_value, cache_index, step,
+      max_position_embeddings, num_heads_Q, num_heads_KV, head_dim,
+      [&](nntrainer::Tensor &k, nntrainer::Tensor &v) {
+        apply_rotary_emb_tensor_v2(key_step, k, head_dim, cache_index,
+                                   use_rope);
+        if (value_step.getDataType() == ml::train::TensorDim::DataType::FP32)
+          apply_rotary_emb_tensor_v2(value_step, v, head_dim, cache_index,
+                                     false);
+        else
+          v.copyData(value_step);
+        if (use_rope)
+          apply_rotary_emb_tensor_v2(query_step, query_step, head_dim,
+                                     cache_index);
+      },
+      [&](nntrainer::Tensor &k, nntrainer::Tensor &v, nntrainer::Tensor &p,
+          unsigned int physical_from) {
+        const unsigned int group = num_heads_Q / num_heads_KV;
+        compute_kcaches(query_step, k, p, physical_from, step, num_heads_Q,
+                        group, head_dim);
+        softmax_triangle(p, step, num_heads_Q, physical_from);
+        compute_fp16vcache_transposed(p, v, attention_output_step,
+                                      physical_from, num_heads_KV, group,
+                                      head_dim, physical_from + step);
+      });
+    return;
+  }
 
   /**
    *
@@ -6163,9 +6205,12 @@ void MHACoreLayer::setProperty(const std::vector<std::string> &values) {
   for (const auto &value : values) {
     std::string key;
     std::string parsed_value;
-    if (nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE &&
-        key == "cache_index") {
+    const bool parsed =
+      nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE;
+    if (parsed && key == "cache_index") {
       setCacheIndex(static_cast<unsigned int>(std::stoul(parsed_value)));
+    } else if (parsed && h2o_.consumeProperty(key, parsed_value)) {
+      continue;
     } else {
       props.push_back(value);
     }

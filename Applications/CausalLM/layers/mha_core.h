@@ -37,6 +37,7 @@
 #include <acti_func.h>
 #include <common_properties.h>
 #include <cpu_backend.h>
+#include <h2o.h>
 #include <layer_impl.h>
 #include <limits.h>
 #include <util_simd.h>
@@ -521,6 +522,7 @@ private:
 
   float epsilon;            /** to avoid overflow */
   unsigned int cache_index; /** idx of kv cache */
+  H2OState h2o_; /** Optional online KV eviction, local to this layer. */
 
   /**
    * @brief Honor the LayerImpl `skip_prefill` property. Gemma4 KV-shared
