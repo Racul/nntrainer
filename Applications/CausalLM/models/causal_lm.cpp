@@ -89,7 +89,7 @@ void clLaunchStatDump(const char *phase);
 #include <cuda_context_manager.h>
 #include <cuda_elementwise.h>
 #include <cuda_emb_gather.h> // [reload] gather LUT teardown
-#include <cuda_fc_qs4cx.h> // [lmhead-tie-lut] tied-head LUT registration
+#include <cuda_fc_qs4cx.h>   // [lmhead-tie-lut] tied-head LUT registration
 #include <cuda_runtime.h>
 #include <cuda_stream_manager.h>
 #endif
@@ -399,6 +399,32 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
     SAMPLING_SEED = causallm::kDefaultSamplingSeed;
   rng.seed(SAMPLING_SEED);
   global_token_len = 0;
+
+  pyramidkv_properties_.clear();
+  if (nntr_cfg.contains("pyramidkv")) {
+    const auto &settings = nntr_cfg.at("pyramidkv");
+    if (!settings.is_object())
+      throw std::invalid_argument("pyramidkv must be a JSON object");
+    const auto read = [&](const char *name, unsigned int fallback) {
+      return settings.contains(name)
+               ? PyramidKVConfig::parseUnsigned(settings.at(name).dump())
+               : fallback;
+    };
+    PyramidKVConfig config{read("budget", 0), read("window", 64),
+                           read("kernel", 5), read("beta", 20)};
+    config.validate();
+    if (config.budget) {
+      if (cfg.value("model_type", std::string()) != "qwen3" ||
+          nntr_cfg.value("model_tensor_type", std::string()) != "FP32-FP32")
+        throw std::invalid_argument(
+          "PyramidKV currently supports Qwen3 FP32-FP32 only");
+      pyramidkv_properties_ = {
+        "pyramidkv_budget=" + std::to_string(config.budget),
+        "pyramidkv_window=" + std::to_string(config.window),
+        "pyramidkv_kernel=" + std::to_string(config.kernel),
+        "pyramidkv_beta=" + std::to_string(config.beta)};
+    }
+  }
 }
 
 void CausalLM::allocateAndBindKVCache() {
@@ -947,6 +973,9 @@ std::string CausalLM::kvCacheModelTag() const {
 }
 
 void CausalLM::save_kvcache(std::string path, int to_) {
+  if (!pyramidkv_properties_.empty())
+    throw std::invalid_argument(
+      "PyramidKV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     throw std::runtime_error(
       "save_kvcache called before allocateAndBindKVCache()");
@@ -991,6 +1020,9 @@ void CausalLM::setPrecomputedKVCache(const std::string &path,
 }
 
 void CausalLM::load_kvcache(std::string path, int to_) {
+  if (!pyramidkv_properties_.empty())
+    throw std::invalid_argument(
+      "PyramidKV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1004,6 +1036,9 @@ void CausalLM::load_kvcache(std::string path, int to_) {
 
 unsigned int CausalLM::resumeFromKVCacheFile(const std::string &path,
                                              unsigned int token_len) {
+  if (!pyramidkv_properties_.empty())
+    throw std::invalid_argument(
+      "PyramidKV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1349,6 +1384,14 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
                              "initialize() before run().");
   }
 
+  if (!pyramidkv_properties_.empty() &&
+      (BATCH_SIZE != 1 || SKIP_PREFILL || USE_KVCACHE ||
+       global_token_len != 0 || causallm_engine() != "cpu" ||
+       prefillDriveChunk() != 0))
+    throw std::invalid_argument(
+      "PyramidKV requires a fresh batch-one CPU run without skipped, cached or "
+      "chunked prefill");
+
   struct StreamerEndGuard {
     BaseStreamer *streamer;
     ~StreamerEndGuard() { streamer_end(streamer); }
@@ -1519,6 +1562,42 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   _input.clear();
 
   unsigned int init_len = init_input.size();
+  if (!pyramidkv_properties_.empty()) {
+    if (!init_len || static_cast<uint64_t>(init_len) + reserved_for_generation >
+                       std::min<uint64_t>(MAX_SEQ_LEN, MAX_POSITION_EMBEDDINGS))
+      throw std::invalid_argument(
+        "PyramidKV prompt/generation exceeds sequence limits");
+    auto properties = pyramidkv_properties_;
+    properties.push_back("pyramidkv_layers=" + std::to_string(NUM_LAYERS));
+    std::vector<bool> seen(static_cast<size_t>(NUM_LAYERS), false);
+    unsigned int layers = 0;
+    model->forEachLayer(
+      [&](ml::train::Layer &layer, nntrainer::RunLayerContext &, void *) {
+        if (layer.getType() == MHACoreLayer::type) {
+          const auto &name = layer.getName();
+          const auto index =
+            PyramidKVConfig::parseUnsigned(name.substr(5, name.find('_') - 5));
+          if (index >= seen.size() || seen[index] ||
+              name != "layer" + std::to_string(index) + "_attention")
+            throw std::invalid_argument("Invalid PyramidKV Qwen3 layer name");
+          auto settings = properties;
+          settings.push_back("pyramidkv_layer=" + std::to_string(index));
+          settings.push_back("pyramidkv_prompt_length=" +
+                             std::to_string(init_len));
+          layer.setProperty(settings);
+          seen[index] = true;
+          ++layers;
+        }
+      },
+      nullptr);
+    if (layers != static_cast<unsigned int>(NUM_LAYERS))
+      throw std::invalid_argument(
+        "PyramidKV requires an MHA cache in every layer");
+    std::clog << "[PyramidKV]";
+    for (const auto &property : pyramidkv_properties_)
+      std::clog << " " << property;
+    std::clog << std::endl;
+  }
   float *input_sample =
     (float *)malloc(sizeof(float) * BATCH_SIZE * MAX_SEQ_LEN);
   std::vector<bool> eos_list(BATCH_SIZE, false);
