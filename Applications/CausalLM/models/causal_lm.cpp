@@ -89,7 +89,7 @@ void clLaunchStatDump(const char *phase);
 #include <cuda_context_manager.h>
 #include <cuda_elementwise.h>
 #include <cuda_emb_gather.h> // [reload] gather LUT teardown
-#include <cuda_fc_qs4cx.h> // [lmhead-tie-lut] tied-head LUT registration
+#include <cuda_fc_qs4cx.h>   // [lmhead-tie-lut] tied-head LUT registration
 #include <cuda_runtime.h>
 #include <cuda_stream_manager.h>
 #endif
@@ -399,6 +399,26 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
     SAMPLING_SEED = causallm::kDefaultSamplingSeed;
   rng.seed(SAMPLING_SEED);
   global_token_len = 0;
+
+  h2o_properties_.clear();
+  if (nntr_cfg.contains("h2o")) {
+    const auto &settings = nntr_cfg.at("h2o");
+    if (!settings.is_object())
+      throw std::invalid_argument("h2o must be a JSON object");
+    const auto read = [&](const char *name, unsigned int fallback) {
+      return settings.contains(name)
+               ? H2OConfig::parseUnsigned(settings.at(name).dump())
+               : fallback;
+    };
+    H2OConfig config{read("budget", 0), read("recent", 128)};
+    config.validate();
+    if (config.budget) {
+      if (cfg.value("model_type", std::string()) != "qwen3")
+        throw std::invalid_argument("H2O currently supports Qwen3 only");
+      h2o_properties_ = {"h2o_budget=" + std::to_string(config.budget),
+                         "h2o_recent=" + std::to_string(config.recent)};
+    }
+  }
 }
 
 void CausalLM::allocateAndBindKVCache() {
@@ -947,6 +967,8 @@ std::string CausalLM::kvCacheModelTag() const {
 }
 
 void CausalLM::save_kvcache(std::string path, int to_) {
+  if (!h2o_properties_.empty())
+    throw std::invalid_argument("H2O does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     throw std::runtime_error(
       "save_kvcache called before allocateAndBindKVCache()");
@@ -991,6 +1013,8 @@ void CausalLM::setPrecomputedKVCache(const std::string &path,
 }
 
 void CausalLM::load_kvcache(std::string path, int to_) {
+  if (!h2o_properties_.empty())
+    throw std::invalid_argument("H2O does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1004,6 +1028,8 @@ void CausalLM::load_kvcache(std::string path, int to_) {
 
 unsigned int CausalLM::resumeFromKVCacheFile(const std::string &path,
                                              unsigned int token_len) {
+  if (!h2o_properties_.empty())
+    throw std::invalid_argument("H2O does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1349,6 +1375,14 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
                              "initialize() before run().");
   }
 
+  if (!h2o_properties_.empty() &&
+      (BATCH_SIZE != 1 || SKIP_PREFILL || USE_KVCACHE ||
+       global_token_len != 0 || causallm_engine() != "cpu" ||
+       prefillDriveChunk() != 0))
+    throw std::invalid_argument(
+      "H2O requires a fresh batch-one CPU run without skipped, cached or "
+      "chunked prefill");
+
   struct StreamerEndGuard {
     BaseStreamer *streamer;
     ~StreamerEndGuard() { streamer_end(streamer); }
@@ -1519,6 +1553,27 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   _input.clear();
 
   unsigned int init_len = init_input.size();
+  if (!h2o_properties_.empty()) {
+    if (!init_len || static_cast<uint64_t>(init_len) + reserved_for_generation >
+                       std::min<uint64_t>(MAX_SEQ_LEN, MAX_POSITION_EMBEDDINGS))
+      throw std::invalid_argument(
+        "H2O prompt/generation exceeds sequence limits");
+    auto properties = h2o_properties_;
+    properties.push_back("h2o_prompt_length=" + std::to_string(init_len));
+    unsigned int layers = 0;
+    model->forEachLayer(
+      [&](ml::train::Layer &layer, nntrainer::RunLayerContext &, void *) {
+        if (layer.getType() == MHACoreLayer::type) {
+          layer.setProperty(properties);
+          ++layers;
+        }
+      },
+      nullptr);
+    if (layers != static_cast<unsigned int>(NUM_LAYERS))
+      throw std::invalid_argument("H2O requires an MHA cache in every layer");
+    std::clog << "[H2O] " << h2o_properties_[0] << " " << h2o_properties_[1]
+              << std::endl;
+  }
   float *input_sample =
     (float *)malloc(sizeof(float) * BATCH_SIZE * MAX_SEQ_LEN);
   std::vector<bool> eos_list(BATCH_SIZE, false);
