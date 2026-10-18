@@ -155,6 +155,18 @@ predictions cannot be reused as Windows predictions. An old full run interrupted
 when changing scope is not relabeled as complete. Preserve its original helper
 version because resume checks include the helper hash.
 
+Native Windows output is read as raw UTF-8 before reversing the CRT's LF-to-CRLF
+translation. This preserves prompts containing original CRLF line endings,
+which text-mode universal-newline reads otherwise turn into extra blank lines.
+When importing an older run, the sole recoverable invalid-record failure is
+`Cannot find exact echoed prompt in model stdout` from that legacy parser on
+Windows. Recovery requires the native adapter's successful-exit marker, unchanged
+metrics and activation checks, exact prompt matching and official rescoring.
+The original invalid record/logs remain untouched; the imported record carries
+the original failure and log hashes under `reuse_provenance.parser_recovery`.
+Other invalid records still prevent reuse. No model execution is fabricated or
+repeated to repair an output-parser failure.
+
 The 2026-10-18 run changed scope at the user's request after 184 valid Linux
 predictions. It now selects the first sample of each task on both platforms,
 reusing the two matching Linux NarrativeQA predictions. The 72-trial latency and

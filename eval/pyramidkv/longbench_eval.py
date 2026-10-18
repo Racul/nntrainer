@@ -31,6 +31,9 @@ TASKS = (
     "lsht passage_count passage_retrieval_en passage_retrieval_zh lcc repobench-p"
 ).split()
 PLAIN = {"trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"}
+LEGACY_STDOUT_PARSER = "separate stdout/stderr; exact echoed prompt and completed timing trailer"
+STDOUT_PARSER = LEGACY_STDOUT_PARSER + "; undo native Windows CRT newline translation before matching"
+LEGACY_NEWLINE_FAILURE = "Cannot find exact echoed prompt in model stdout"
 
 
 def write_json(path, value):
@@ -141,6 +144,14 @@ def run_model(command, env, stdout_path, stderr_path, on_start=None):
     return code, process.pid, time.monotonic() - start
 
 
+def read_stdout(path):
+    # Preserve CR bytes until the Windows CRT's text-mode LF -> CRLF
+    # translation has been reversed. Universal-newline reads turn an original
+    # CRLF echoed as CRCRLF into two LFs and lose the prompt's exact structure.
+    stdout = path.read_bytes().decode("utf-8", errors="strict")
+    return stdout.replace("\r\n", "\n") if common.WINDOWS else stdout
+
+
 def extract_prediction(stdout, prompt):
     stdout = stdout.replace("\r\n", "\n")
     prompt = prompt.replace("\r\n", "\n")
@@ -189,21 +200,32 @@ def reuse_records(source, out, protocol, selected, scorer):
         raise ValueError("Reuse source and output must differ")
     old_path, records_path = source / 'manifest.json', source / 'records.jsonl'
     old = json.loads(old_path.read_text(encoding='utf-8'))
-    # The new script adds selection/import only. All inference, scoring,
-    # model, binary, runtime and environment settings must still match.
-    ignored = {'script_sha256', 'sample_selection'}
+    # Selection/import and CRT decoding do not alter model inference. All
+    # scoring, model, binary, runtime and environment settings must still match;
+    # the only accepted older parser is the known exact-prompt implementation.
+    old_parser = old['protocol']['stdout_parser']
+    if old_parser not in (LEGACY_STDOUT_PARSER, STDOUT_PARSER):
+        raise ValueError('Cannot reuse an unknown stdout parser')
+    ignored = {'script_sha256', 'sample_selection', 'stdout_parser'}
     previous = {k: v for k, v in old['protocol'].items() if k not in ignored}
     current = {k: v for k, v in protocol.items() if k not in ignored}
     if previous != current:
         different = sorted(k for k in set(previous) | set(current) if previous.get(k) != current.get(k))
         raise ValueError('Cannot reuse different inference/scoring protocol: ' + ', '.join(different))
     rows = [json.loads(line) for line in records_path.open(encoding='utf-8')]
-    if len(rows) != old['completed'] or any(not r.get('valid') for r in rows):
-        raise ValueError('Reuse source is incomplete or contains invalid records')
+    if len(rows) != old['completed']:
+        raise ValueError('Reuse source record count differs from its manifest')
+    def newline_failure(row):
+        return (common.WINDOWS and old_parser == LEGACY_STDOUT_PARSER
+                and row.get('valid') is False and row.get('quality_score') is None
+                and row.get('failure') == LEGACY_NEWLINE_FAILURE)
+    if any(not r.get('valid') and not newline_failure(r) for r in rows):
+        raise ValueError('Reuse source contains an unresolved invalid record')
     validate_record_ids(rows, protocol['conditions'], old['protocol']['cases_manifest']['counts'])
     proof = dict(source=str(source), manifest_sha256=common.sha(old_path),
                  records_sha256=common.sha(records_path),
-                 original_script_sha256=old['protocol']['script_sha256'])
+                 original_script_sha256=old['protocol']['script_sha256'],
+                 original_stdout_parser=old_parser)
     result = []
     for row in rows:
         key = row['task'], row['index']
@@ -215,8 +237,11 @@ def reuse_records(source, out, protocol, selected, scorer):
         relative = Path('logs') / case['task'] / f"{case['index']:04d}-{row['condition']}"
         stdout_path = source / (str(relative) + '.stdout.log')
         stderr_path = source / (str(relative) + '.stderr.log')
-        stdout = stdout_path.read_text(encoding='utf-8')
+        stdout = read_stdout(stdout_path)
         stderr = stderr_path.read_text(encoding='utf-8')
+        repairing = newline_failure(row)
+        if repairing and not stdout.rstrip().endswith('[WINDOWS-EXIT-ADAPTER] main returned code=0'):
+            raise ValueError('Newline recovery requires evidence of successful native model exit')
         metrics, errors = common.parse_metrics(stdout + '\n' + stderr, 0,
                                                case['tokens'], case['max_new_tokens'] - 1)
         errors += common.check_condition(stderr, row['condition'], protocol['pyramidkv'])
@@ -226,10 +251,16 @@ def reuse_records(source, out, protocol, selected, scorer):
         scored = pred.lstrip('\n').split('\n')[0] if case['task'] in {'trec', 'triviaqa', 'samsum', 'lsht'} else pred
         score = max(scorer.dataset2metric[case['task']](scored, answer,
                     all_classes=case['all_classes']) for answer in case['answers'])
-        if pred != row['pred'] or not math.isclose(score, row['quality_score'], rel_tol=0, abs_tol=1e-12):
+        if not repairing and (pred != row['pred'] or not math.isclose(score, row['quality_score'], rel_tol=0, abs_tol=1e-12)):
             raise ValueError('Reused prediction/score differs from official rescoring')
         copied = dict(row, reuse_provenance=dict(proof, stdout_sha256=common.sha(stdout_path),
                                                stderr_sha256=common.sha(stderr_path)))
+        if repairing:
+            copied.update(pred=pred, quality_score=score, valid=True, failure='')
+            copied['reuse_provenance']['parser_recovery'] = dict(
+                original_failure=row['failure'], original_valid=False,
+                reason='Reverse Windows CRT CRLF translation before exact echoed-prompt matching',
+                model_rerun=False)
         for src in (stdout_path, stderr_path):
             dst = out / src.relative_to(source)
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -292,7 +323,7 @@ def evaluate(args):
                     cases=str(args.cases), max_input_tokens=args.max_input,
                     quality_generation="greedy, official task max_new_tokens including first prefill output",
                     quality_repetitions=1, model_seed=42,
-                    stdout_parser="separate stdout/stderr; exact echoed prompt and completed timing trailer",
+                    stdout_parser=STDOUT_PARSER,
                     first_token="init_seq_len=actual_prompt_tokens+1 to register the prefill output",
                     script_sha256=common.sha(Path(__file__)),
                     helper_sha256=common.sha(Path(common.__file__)),
@@ -412,7 +443,7 @@ def evaluate(args):
                         manifest['active']['pid'] = pid
                         write_json(manifest_path, manifest)
                     code, pid, duration = run_model(command, envs[mode], stdout_path, stderr_path, started)
-                    stdout = stdout_path.read_text(encoding="utf-8", errors="strict")
+                    stdout = read_stdout(stdout_path)
                     stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
                     metrics, errors = common.parse_metrics(stdout + "\n" + stderr, code, case["tokens"], case["max_new_tokens"] - 1)
                     errors += common.check_condition(stderr, mode, protocol["pyramidkv"])
