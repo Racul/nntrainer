@@ -168,6 +168,12 @@ Other invalid records still prevent reuse. No model execution is fabricated or
 repeated to repair an output-parser failure.
 
 The 2026-10-18 run changed scope at the user's request after 184 valid Linux
-predictions. It now selects the first sample of each task on both platforms,
-reusing the two matching Linux NarrativeQA predictions. The 72-trial latency and
+predictions. The fixed subset completed on 2026-10-19 with the first sample of every task
+on both platforms: 84 valid predictions. Matching completed predictions were
+verified against raw logs and official scores before reuse. The 72-trial latency and
 memory experiment remains complete and unchanged.
+
+Completed reports: [three-trial CPU performance](results/20261018-cpu.md) and
+[21-task fixed-subset LongBench quality](results/20261019-longbench-subset.md).
+The quality report includes official task scores, all 84 prediction summaries,
+raw-log hashes and the preserved native Windows newline-parser recovery.
