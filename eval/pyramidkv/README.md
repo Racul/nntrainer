@@ -77,7 +77,7 @@ separately; a checkout HEAD alone does not identify an executable.
 
 ## LongBench v1
 
-`longbench_eval.py` evaluates all 21 tasks and 4,750 samples without subsampling.
+By default, `longbench_eval.py` evaluates all 21 tasks and 4,750 samples.
 It requires a local copy of the official dataset and scoring sources; it does
 not download code or data implicitly. Use the same pinned sources on both
 platforms and compare the saved protocol hashes before resuming.
@@ -123,3 +123,39 @@ steps. This is checked with a tiny deterministic model. Latency measurements
 above retain their original protocol. Qwen3 uses its official non-thinking chat
 template except for the six tasks that official LongBench runs without chat
 wrapping. SAMSum adds newline to EOS, as in the official prediction script.
+
+### Fixed subset evaluation
+
+Use `--samples-per-task N` to evaluate fixed dataset indices `0..N-1` in every
+one of the 21 tasks. Selection does not depend on observed scores. For example,
+`--samples-per-task 1` runs 42 predictions per platform, or 84 across Linux and
+native Windows with both conditions. This is a small diagnostic subset; its
+scores must not be presented as full LongBench results. Quality remains one
+greedy prediction per case/condition, separate from the three-repetition
+performance experiment. A subset manifest can reach `COMPLETE` for its selected
+cases while retaining `evaluation_scope=FIXED_SUBSET` and
+`full_dataset_complete=false`.
+
+```bash
+python3 eval/pyramidkv/longbench_eval.py \
+  --model models/qwen3-fp32 --official /path/to/pinned/LongBench \
+  --cases /path/to/cases-8192.jsonl --max-input 8192 \
+  --baseline-bin /path/to/main/nntr_causallm \
+  --pyramidkv-bin /path/to/pyramidkv/nntr_causallm \
+  --samples-per-task 1 --reuse-from /path/to/earlier-linux-run \
+  --output /path/to/new-linux-subset
+```
+
+`--reuse-from` is optional and only supported with a declared subset. It checks
+the earlier model/binary/runtime/environment/prompt/scoring protocol, then
+reparses original raw output, checks activation and recomputes official scores.
+Matching selected records and raw logs are copied with source/log checksums.
+Original records, timings and incomplete full-run logs remain unchanged. Linux
+predictions cannot be reused as Windows predictions. An old full run interrupted
+when changing scope is not relabeled as complete. Preserve its original helper
+version because resume checks include the helper hash.
+
+The 2026-10-18 run changed scope at the user's request after 184 valid Linux
+predictions. It now selects the first sample of each task on both platforms,
+reusing the two matching Linux NarrativeQA predictions. The 72-trial latency and
+memory experiment remains complete and unchanged.

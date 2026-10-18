@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Run full LongBench v1 on native NNTrainer binaries with resumable records.
+"""Run LongBench v1, or a declared fixed subset, on native NNTrainer binaries.
 
 Prepare shared cases with --prepare, then run each platform's two conditions.
 Official source, data, model and executable paths are mandatory local inputs.
@@ -12,10 +12,12 @@ from datetime import datetime
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -152,8 +154,98 @@ def extract_prediction(stdout, prompt):
     return stdout[start:end]
 
 
-def save_scores(out, records, scorer, conditions, case_counts):
-    report = ["# LongBench v1", "", "Partial until every task reaches its expected sample count.", "",
+def select_cases(path, counts, samples_per_task):
+    """Select fixed dataset indices, independently of any observed scores."""
+    if samples_per_task is None:
+        return dict(counts), None
+    if samples_per_task < 1 or samples_per_task > min(counts.values()):
+        raise ValueError("samples-per-task must fit every official task")
+    selected = {}
+    for line in path.open(encoding="utf-8"):
+        case = json.loads(line)
+        key = case['task'], case['index']
+        if case['task'] in TASKS and 0 <= case['index'] < samples_per_task:
+            if key in selected:
+                raise ValueError("Duplicate selected case")
+            selected[key] = case
+    expected = {(task, index) for task in TASKS for index in range(samples_per_task)}
+    if set(selected) != expected:
+        raise ValueError("Missing fixed-subset cases")
+    return {task: samples_per_task for task in TASKS}, selected
+
+
+def validate_record_ids(records, conditions, case_counts):
+    keys = [(r['task'], r['index'], r['condition']) for r in records]
+    if len(set(keys)) != len(keys):
+        raise ValueError("Duplicate prediction records")
+    if any(task not in case_counts or not 0 <= index < case_counts[task] or mode not in conditions
+           for task, index, mode in keys):
+        raise ValueError("Prediction records fall outside the selected cases")
+
+
+def reuse_records(source, out, protocol, selected, scorer):
+    """Validate original predictions/logs before importing selected records."""
+    if source.resolve() == out.resolve():
+        raise ValueError("Reuse source and output must differ")
+    old_path, records_path = source / 'manifest.json', source / 'records.jsonl'
+    old = json.loads(old_path.read_text(encoding='utf-8'))
+    # The new script adds selection/import only. All inference, scoring,
+    # model, binary, runtime and environment settings must still match.
+    ignored = {'script_sha256', 'sample_selection'}
+    previous = {k: v for k, v in old['protocol'].items() if k not in ignored}
+    current = {k: v for k, v in protocol.items() if k not in ignored}
+    if previous != current:
+        different = sorted(k for k in set(previous) | set(current) if previous.get(k) != current.get(k))
+        raise ValueError('Cannot reuse different inference/scoring protocol: ' + ', '.join(different))
+    rows = [json.loads(line) for line in records_path.open(encoding='utf-8')]
+    if len(rows) != old['completed'] or any(not r.get('valid') for r in rows):
+        raise ValueError('Reuse source is incomplete or contains invalid records')
+    validate_record_ids(rows, protocol['conditions'], old['protocol']['cases_manifest']['counts'])
+    proof = dict(source=str(source), manifest_sha256=common.sha(old_path),
+                 records_sha256=common.sha(records_path),
+                 original_script_sha256=old['protocol']['script_sha256'])
+    result = []
+    for row in rows:
+        key = row['task'], row['index']
+        if key not in selected:
+            continue
+        case = selected[key]
+        if any(row[k] != v for k, v in case.items() if k != 'prompt'):
+            raise ValueError('Reused record does not match its prepared case')
+        relative = Path('logs') / case['task'] / f"{case['index']:04d}-{row['condition']}"
+        stdout_path = source / (str(relative) + '.stdout.log')
+        stderr_path = source / (str(relative) + '.stderr.log')
+        stdout = stdout_path.read_text(encoding='utf-8')
+        stderr = stderr_path.read_text(encoding='utf-8')
+        metrics, errors = common.parse_metrics(stdout + '\n' + stderr, 0,
+                                               case['tokens'], case['max_new_tokens'] - 1)
+        errors += common.check_condition(stderr, row['condition'], protocol['pyramidkv'])
+        if errors or any(row[k] != v for k, v in metrics.items()):
+            raise ValueError('Reused metrics/activation differ from original raw logs')
+        pred = extract_prediction(stdout, case['prompt'])
+        scored = pred.lstrip('\n').split('\n')[0] if case['task'] in {'trec', 'triviaqa', 'samsum', 'lsht'} else pred
+        score = max(scorer.dataset2metric[case['task']](scored, answer,
+                    all_classes=case['all_classes']) for answer in case['answers'])
+        if pred != row['pred'] or not math.isclose(score, row['quality_score'], rel_tol=0, abs_tol=1e-12):
+            raise ValueError('Reused prediction/score differs from official rescoring')
+        copied = dict(row, reuse_provenance=dict(proof, stdout_sha256=common.sha(stdout_path),
+                                               stderr_sha256=common.sha(stderr_path)))
+        for src in (stdout_path, stderr_path):
+            dst = out / src.relative_to(source)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists() and common.sha(dst) != common.sha(src):
+                raise ValueError('Refusing to replace different imported raw logs')
+            if not dst.exists():
+                shutil.copy2(src, dst)
+        result.append(copied)
+    return result, dict(proof, imported=len(result))
+
+
+def save_scores(out, records, scorer, conditions, case_counts, samples_per_task=None):
+    scope = (f"SUBSET: fixed first {samples_per_task} sample(s) per task; these are not full-dataset scores."
+             if samples_per_task is not None else "Full dataset evaluation.")
+    report = ["# LongBench v1", "", scope, "",
+              "Run incomplete until every selected task/condition reaches its expected count.", "",
               "|Task|Baseline score|PyramidKV score|Baseline n|PyramidKV n|Expected n|",
               "|---|---:|---:|---:|---:|---:|"]
     result = {}
@@ -190,6 +282,12 @@ def evaluate(args):
         raise ValueError("Prepared cases do not match the chosen context limit/hash")
     if protocol["asset_sha256"]["tokenizer_file"] != cases_manifest["tokenizer_sha256"]:
         raise ValueError("Tokenizer differs from the prepared prompt tokens")
+    case_counts, selected = select_cases(args.cases, cases_manifest['counts'], args.samples_per_task)
+    if selected is not None:
+        identities = [[task, index, case['prompt_ids_sha256']] for (task, index), case in selected.items()]
+        protocol['sample_selection'] = dict(kind='fixed_first_per_task', samples_per_task=args.samples_per_task,
+            counts=case_counts, total=len(selected), case_ids=identities,
+            identity_sha256=hashlib.sha256(json.dumps(identities, separators=(',', ':')).encode()).hexdigest())
     protocol.update(benchmark="LongBench v1", cases_manifest=cases_manifest,
                     cases=str(args.cases), max_input_tokens=args.max_input,
                     quality_generation="greedy, official task max_new_tokens including first prefill output",
@@ -216,7 +314,14 @@ def evaluate(args):
     protocol['scorer_source_sha256'] = {name: common.sha(args.official / name) for name in ('eval.py', 'metrics.py')}
     scorer = load_scorer(args.official)
     if args.check:
-        print("LongBench full-data preflight passed; no inference performed")
+        if args.reuse_from:
+            with tempfile.TemporaryDirectory(prefix='nntr-longbench-reuse-check-') as tmp:
+                reused, _ = reuse_records(args.reuse_from, Path(tmp), protocol, selected, scorer)
+            print(f'Validated {len(reused)} reusable predictions against original logs and official scores')
+        print(f"LongBench preflight passed: {sum(case_counts.values())} cases per condition; "
+              f"scope={'FULL' if selected is None else 'SUBSET'}; no inference performed")
+        if selected is not None:
+            print('selection_sha256=' + protocol['sample_selection']['identity_sha256'])
         return
     out = args.output
     out.mkdir(parents=True, exist_ok=True)
@@ -234,12 +339,23 @@ def evaluate(args):
             raise ValueError("Records exist without matching manifest")
         manifest = dict(protocol=protocol, started_at=datetime.now().astimezone().isoformat())
         records = []
+        if args.reuse_from:
+            records, manifest['reuse'] = reuse_records(args.reuse_from, out, protocol, selected, scorer)
+            temporary = records_path.with_suffix('.jsonl.tmp')
+            with temporary.open('w', encoding='utf-8') as stream:
+                for row in records:
+                    stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + '\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(records_path)
+    validate_record_ids(records, protocol['conditions'], case_counts)
     done = {(r["task"], r["index"], r["condition"]) for r in records}
-    if len(done) != len(records):
-        raise ValueError("Duplicate prediction records")
     manifest.update(status="RUNNING", controller_pid=os.getpid(), completed=len(records),
-                    expected=4750 * len(protocol["conditions"]))
+                    expected=sum(case_counts.values()) * len(protocol["conditions"]),
+                    evaluation_scope='FULL_DATASET' if selected is None else 'FIXED_SUBSET',
+                    full_dataset_complete=False)
     write_json(manifest_path, manifest)
+    save_scores(out, records, scorer, protocol['conditions'], case_counts, args.samples_per_task)
     tokenizer = Tokenizer.from_file(protocol["configs"]["nntr_config.json"]["tokenizer_file"])
     try:
         with tempfile.TemporaryDirectory(prefix="nntr-pyramidkv-longbench-") as tmp:
@@ -247,6 +363,8 @@ def evaluate(args):
             (model / "config.json").write_text(json.dumps(protocol["configs"]["config.json"]), encoding="utf-8")
             for line in args.cases.open(encoding="utf-8"):
                 case = json.loads(line)
+                if selected is not None and (case['task'], case['index']) not in selected:
+                    continue
                 modes = protocol["conditions"] if case["index"] % 2 == 0 else list(reversed(protocol["conditions"]))
                 for mode in modes:
                     key = case["task"], case["index"], mode
@@ -320,20 +438,23 @@ def evaluate(args):
                     manifest.pop("active", None)
                     manifest["completed"] = len(records)
                     write_json(manifest_path, manifest)
-                    save_scores(out, records, scorer, protocol["conditions"], cases_manifest["counts"])
+                    save_scores(out, records, scorer, protocol["conditions"], case_counts, args.samples_per_task)
                     print("DONE", case["task"], stem, f"valid={not errors}", f"{len(records)}/{manifest['expected']}", flush=True)
                     if errors:
                         raise RuntimeError("Invalid LongBench run: " + "; ".join(errors))
         if len(records) != manifest["expected"]:
-            raise RuntimeError("Incomplete full-dataset evaluation")
+            raise RuntimeError("Incomplete selected-case evaluation")
         for task in TASKS:
             for mode in protocol['conditions']:
                 selected = [r for r in records if r['task'] == task and r['condition'] == mode]
+                if len(selected) != case_counts[task]:
+                    raise RuntimeError('Incomplete task/condition')
                 official_score = scorer.scorer(task, [r['pred'] for r in selected], [r['answers'] for r in selected], selected[0]['all_classes'])
                 mean_score = round(100 * sum(r['quality_score'] for r in selected) / len(selected), 2)
                 if official_score != mean_score:
                     raise RuntimeError('Incremental score differs from official scorer')
         manifest["status"] = "COMPLETE"
+        manifest['full_dataset_complete'] = args.samples_per_task is None
     except BaseException as error:
         manifest.update(status="INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "FAILED", error=str(error))
         raise
@@ -350,6 +471,8 @@ def main():
     parser.add_argument("--cases", type=Path, required=True)
     parser.add_argument("--max-input", type=int, default=8192)
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--samples-per-task", type=int, help="evaluate a declared subset: fixed first N cases per task")
+    parser.add_argument("--reuse-from", type=Path, help="import matching valid selected predictions and raw logs from an earlier run")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--baseline-bin", type=Path)
@@ -361,12 +484,16 @@ def main():
     parser.add_argument("--beta", type=int, default=20)
     parser.add_argument("--cpus", default="0,2,4,6")
     args = parser.parse_args()
-    for field in ("model", "official", "data", "cases", "output", "baseline_bin", "pyramidkv_bin"):
+    for field in ("model", "official", "data", "cases", "output", "baseline_bin", "pyramidkv_bin", "reuse_from"):
         value = getattr(args, field)
         if value is not None:
             setattr(args, field, value.resolve())
     if args.max_input < 2 or not 0 < args.window < args.budget or args.beta < 1 or args.kernel < 1 or not args.kernel % 2:
         parser.error("Invalid input/budget/window/kernel/beta")
+    if args.samples_per_task is not None and args.samples_per_task < 1:
+        parser.error('samples-per-task must be positive')
+    if args.reuse_from and (args.samples_per_task is None or args.prepare):
+        parser.error('reuse-from requires evaluation with samples-per-task')
     if args.prepare:
         if args.data is None:
             parser.error("--prepare requires --data")
