@@ -1,0 +1,2961 @@
+{
+  "created_at": "2026-10-17T16:52:38.167651+00:00",
+  "status": "COMPLETE_PERFORMANCE_ONLY",
+  "baseline_commit": "7d14d001c9e70014de515dbd00ee6986d50d365f",
+  "method_commit": "2013bc91214286c0727bcdf0665b7954af1fef8e",
+  "evaluation_commit": "38243fdf75babadbd2524c72b94e7eebbaa838a6",
+  "model": {
+    "name": "Qwen/Qwen3-0.6B",
+    "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "weights": "FP32",
+    "activations": "FP32",
+    "kv": "UINT16 storing FP16 bits"
+  },
+  "cpu": "11th Gen Intel Core i7-1165G7, 4 cores / 8 logical CPUs",
+  "measured_trials": 72,
+  "function_checks_excluded": 4,
+  "changes": "100 * (method_mean / baseline_mean - 1)",
+  "overall": "Ratio of equally weighted input means, computed separately for each platform",
+  "sampling": {
+    "linux": {
+      "metric": "model-PID smaps RSS sample maximum",
+      "sampler": "Applications/utils/mem_usage.sh",
+      "sha256": "f075e1f0d535128da1d6c2e7dbc5827bf442ff5d3da01be3ca1232074a9d6b62",
+      "sleep_between_samples_seconds": 1,
+      "note": "Original script adds its loop overhead. The helper sample_interval_seconds argument is used only by the Windows observer."
+    },
+    "windows": {
+      "metric": "model-PID PSAPI current WorkingSetSize sample maximum",
+      "sleep_between_samples_seconds": 0.05,
+      "note": "PSAPI PeakWorkingSetSize is recorded separately."
+    },
+    "phases": "Latency and memory use separate fresh processes; memory peaks include model loading and prefill."
+  },
+  "evaluated_file_sha256": {
+    "Applications/CausalLM/layers/pyramidkv.h": "d0f0a88027f5a03e0aa68ec4db6caccf37b1d83443a5efe3afa48af19b529ca8",
+    "Applications/CausalLM/layers/mha_core.cpp": "7a26fd16c896895131c80a7f1c1b4b106dcfc7850c97eb2b71e85c8c06ec0ab4",
+    "Applications/CausalLM/layers/mha_core.h": "755d7e0ed50c6d413aaf7eb727aca1d0dd7ae34c305a5b239a6669bfea258608",
+    "Applications/CausalLM/models/causal_lm.cpp": "d325dd81c52902ff1836f1a820f899105cadc84897dd5731fadcea7309ce8cc1",
+    "Applications/CausalLM/models/causal_lm.h": "e1af7101be76624d2f63f8a4075112bc6e0305a2160b8f28db215883eccba104",
+    "Applications/CausalLM/meson.build": "392eda7114b7f8348b6f168bbf58ec6753d3c9f296c2a543a3afb99ac8efb4bf",
+    "test/unittest/models/unittest_pyramidkv.cpp": "cf68796bd64439da68125a064f683ebc8b5cc5862d01bdcd6e271f9409a6516c",
+    "eval/pyramidkv/pyramidkv_eval.py": "524f8e63fe343b1af17683b8929f2f49d51f1f9755b86fd638907228cabf9738",
+    "eval/pyramidkv/longbench_eval.py": "2abfd216c0ff28f6e30a0a39fdbd8c74a1d44285f8ab904bbb0cbdb635e96af8",
+    "eval/pyramidkv/report.py": "bb55ea9c59de71aa561c7ed3e9d61875087f73b21a7a872d9ae08cbc6f6f94e7",
+    "eval/pyramidkv/README.md": "d3bc5ba3942c4da7523830a882d3b99fb78e75e4c455bf9ef185dbaac4782611"
+  },
+  "longbench": {
+    "status": "NOT_COMPLETE",
+    "tasks": 21,
+    "samples_per_condition": 4750,
+    "conditions_per_platform": 2,
+    "platforms": 2,
+    "expected_predictions": 19000,
+    "quality_repetitions": 1,
+    "max_input_tokens": 8192,
+    "truncated_samples_per_condition": 2462,
+    "note": "Full data, greedy quality evaluation; Linux running, Windows queued. No final quality scores claimed."
+  },
+  "platforms": {
+    "linux": {
+      "raw_manifest": "build/validation/pyramidkv-run/performance-linux/linux-comparison.json",
+      "raw_manifest_sha256": "755c186e8dcb21c07160680da395f3d85da4a9ea8677bfed6a76832c652000ed",
+      "protocol": {
+        "conditions": [
+          "baseline",
+          "pyramidkv"
+        ],
+        "context_lengths": [
+          512,
+          2048,
+          4096
+        ],
+        "max_seq_len": 4225,
+        "max_decode_steps": 128,
+        "pyramidkv": {
+          "budget": 256,
+          "window": 64,
+          "kernel": 5,
+          "beta": 20
+        },
+        "batch_size": 1,
+        "repetitions": 3,
+        "interval_seconds": 1,
+        "cpu_affinity": "0,2,4,6",
+        "threads": {
+          "NNTR_NUM_THREADS": 4,
+          "OMP_NUM_THREADS": 4,
+          "OPENBLAS_NUM_THREADS": 1
+        },
+        "asset_sha256": {
+          "model_file_name": "88ffa34cf3c2d5900b62730416aac3f1912df9e8015c6c749f3fd37814bf70ef",
+          "tokenizer_file": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+        },
+        "binary_sha256": {
+          "baseline": "8ecad56b996fa5b03fdd0bf907ecb900f8f9be0710ef9421b05b6a5298767d9e",
+          "pyramidkv": "2052879fecfb2253a4c63d0bc37bc7cb741162fd2320161dbeec1b6908e6acba"
+        },
+        "build_options": {
+          "baseline": {
+            "platform": "none",
+            "buildtype": "release",
+            "enable-transformer": true,
+            "enable-fp16": false,
+            "enable-blas": true,
+            "thread-backend": "omp",
+            "nntr-num-threads": 4,
+            "openblas-num-threads": 1,
+            "enable-opencl": false,
+            "enable-npu": false,
+            "enable-htp": false,
+            "enable-cuda": false
+          },
+          "pyramidkv": {
+            "platform": "none",
+            "buildtype": "release",
+            "enable-transformer": true,
+            "enable-fp16": false,
+            "enable-blas": true,
+            "thread-backend": "omp",
+            "nntr-num-threads": 4,
+            "openblas-num-threads": 1,
+            "enable-opencl": false,
+            "enable-npu": false,
+            "enable-htp": false,
+            "enable-cuda": false
+          }
+        },
+        "policy": "PyramidKV with GQA scores averaged per KV head",
+        "cache_allocation": "unchanged",
+        "quality": "not evaluated",
+        "evaluation_script_sha256": "524f8e63fe343b1af17683b8929f2f49d51f1f9755b86fd638907228cabf9738",
+        "memory_script_sha256": "f075e1f0d535128da1d6c2e7dbc5827bf442ff5d3da01be3ca1232074a9d6b62"
+      },
+      "environment": {
+        "os": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "machine": "x86_64",
+        "processor": "x86_64",
+        "logical_cpus": 8,
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "runtime_controls": {
+          "baseline": {
+            "NNTR_ENGINE": "cpu",
+            "OMP_NUM_THREADS": "4",
+            "NNTR_NUM_THREADS": "4",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "pyramidkv": {
+            "NNTR_ENGINE": "cpu",
+            "OMP_NUM_THREADS": "4",
+            "NNTR_NUM_THREADS": "4",
+            "OPENBLAS_NUM_THREADS": "1"
+          }
+        }
+      },
+      "compiler": {
+        "id": "gcc",
+        "exelist": [
+          "c++"
+        ],
+        "linker_exelist": [
+          "c++"
+        ],
+        "file_suffixes": [
+          "cpp",
+          "cppm",
+          "cc",
+          "cxx",
+          "c++",
+          "hh",
+          "hpp",
+          "ipp",
+          "hxx",
+          "ino",
+          "ixx",
+          "C",
+          "H"
+        ],
+        "default_suffix": "cpp",
+        "version": "13.3.0",
+        "full_version": "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+        "linker_id": "ld.bfd"
+      },
+      "runtime_library_sha256": {
+        "baseline": {
+          "libcausallm.so": [
+            "e4ac8632b8cdb4ea61d15c05701fd11396f6400fa675ebcfd3ab44117acc0d7c"
+          ],
+          "libstdc++.so.6": [
+            "1fd75fe70354a416d75aef22bcae68c47bd25d20e2d0568c30b1a9838cf62f11"
+          ],
+          "libgcc_s.so.1": [
+            "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb"
+          ],
+          "libc.so.6": [
+            "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf"
+          ],
+          "libnntrainer.so": [
+            "98cb6dbd85c5d1161ae7752321e017a07430732b9a5296938350ae01d1df14e8"
+          ],
+          "librms_norm_layer.so": [
+            "aa6f23b6c30177cf05851a41342b6bd74008f6f2e0263a2fd5b82e8f63259d1d"
+          ],
+          "librms_norm_gpu_layer.so": [
+            "0f526b0ec00468301088924ace824077d5abb045762bd46a3ad69f255232087a"
+          ],
+          "libmha_core_layer.so": [
+            "06f82d6149bf9e46e5fc95fc5c19a7472b98f76d4b6fd3b9433699ace5e4dda8"
+          ],
+          "libembedding_layer.so": [
+            "77fc3f243306b8cfc4c7cf8fb835fc8d766dde41a536f685950d5b3c454c66b6"
+          ],
+          "libreshaped_rms_norm_layer.so": [
+            "5c9b3b5174c57967730f7895a537f6811ed50e8fca073c637e395a14c36ba81a"
+          ],
+          "librms_reverse_norm_layer.so": [
+            "23131aa7239854f6ac240213726845e281381c741ec7b092959ce3d7a93c19b3"
+          ],
+          "libembedding_pooling_layer.so": [
+            "ae4a863ce566e87c93dcc26f95b2202fa0daca42b15f2a94d897d780aae2564d"
+          ],
+          "libembedding_normalize_layer.so": [
+            "5edd9f97c3aba736987883c6a6846e6053e574c3dfd86466ec016822b7f96767"
+          ],
+          "libcausal_conv1d_layer.so": [
+            "fd6524d279615c8fedab36020a67684792a4ba554957cf99ca66f3edd9dd24ac"
+          ],
+          "libcustom_multiply.so": [
+            "ea6a308e69f4eff87331348ac32e8b71f2ca377057fda265135392463aa732e8"
+          ],
+          "libdeberta_attention_layer.so": [
+            "a535a3beb41519b8d5c422a626da57559862dcad781fed13bfd656ad3835a0e6"
+          ],
+          "libshared_fully_connected_layer.so": [
+            "b0f8a43d00fbaa9c720c2fdae96cb3facf20c1682a7d520a61121b0898a096ac"
+          ],
+          "libper_layer_slice_layer.so": [
+            "aab327189770934f435a1516f30ea35be21299e60dbdede960940b2409ee2b99"
+          ],
+          "libgptoss_moe_layer.so": [
+            "e72d2457af2f692cfee35863860ae29275eda888b5f7a1a32e727b46b7ecc7c8"
+          ],
+          "libqwen_moe_layer.so": [
+            "eb4a136343fc3745bbe28ab5f0f0e99456034f13e90c0d20529d84f82e1ebed2"
+          ],
+          "libqwen_moe_layer_fsu.so": [
+            "c57adaa7bd3543db4ce9f1aabdae3d43a64ebe2056faf0ac2e3367d796ac5094"
+          ],
+          "libcached_slim_gptoss_moe_layer.so": [
+            "034254203442b773a05bcbc42b20533cac9941eaba98e68e71470f1169ba9438"
+          ],
+          "libqwen_moe_layer_cached.so": [
+            "4269f754eb25a4f72d69ab4ca0a2604fcb0d6f9111f6df2a0592bfc9b020913b"
+          ],
+          "libm.so.6": [
+            "fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0"
+          ],
+          "libopenblas.so.0": [
+            "bfc7492adbf84a8f567720a9e1fae2afc18f3d817da233e7f4d453683485308e"
+          ],
+          "libgfortran.so.5": [
+            "342618ccfebe840446e4ef2b7893f4161b2084845e570f42d68a70bfde58a58d"
+          ]
+        },
+        "pyramidkv": {
+          "libcausallm.so": [
+            "69f4b88cd5c0dd5415bf8be6c1368c6444b69362f23ff130112b001fb5cd1c78"
+          ],
+          "libstdc++.so.6": [
+            "1fd75fe70354a416d75aef22bcae68c47bd25d20e2d0568c30b1a9838cf62f11"
+          ],
+          "libgcc_s.so.1": [
+            "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb"
+          ],
+          "libc.so.6": [
+            "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf"
+          ],
+          "libnntrainer.so": [
+            "d1668176fac3d89ea032e8bfc45c9275bda61e613eb63b4a63d5bfe1ee2f8ef5"
+          ],
+          "librms_norm_layer.so": [
+            "aa6f23b6c30177cf05851a41342b6bd74008f6f2e0263a2fd5b82e8f63259d1d"
+          ],
+          "librms_norm_gpu_layer.so": [
+            "0f526b0ec00468301088924ace824077d5abb045762bd46a3ad69f255232087a"
+          ],
+          "libmha_core_layer.so": [
+            "1a2a8fabe161eb73a43e5b910a8fb6dafa2e8c1c789d0a7848b901ed1f56fe26"
+          ],
+          "libembedding_layer.so": [
+            "6b8ed7c4c23e69b8c0ef2fde7f8ec2b62a19683036dcf802475669bdce01cb64"
+          ],
+          "libreshaped_rms_norm_layer.so": [
+            "5c9b3b5174c57967730f7895a537f6811ed50e8fca073c637e395a14c36ba81a"
+          ],
+          "librms_reverse_norm_layer.so": [
+            "23131aa7239854f6ac240213726845e281381c741ec7b092959ce3d7a93c19b3"
+          ],
+          "libembedding_pooling_layer.so": [
+            "0cffcd58d5712fdfc7eee202a7cae2035177e531e821a8fee5fb488bd84f1a7d"
+          ],
+          "libembedding_normalize_layer.so": [
+            "5edd9f97c3aba736987883c6a6846e6053e574c3dfd86466ec016822b7f96767"
+          ],
+          "libcausal_conv1d_layer.so": [
+            "fd6524d279615c8fedab36020a67684792a4ba554957cf99ca66f3edd9dd24ac"
+          ],
+          "libcustom_multiply.so": [
+            "ea6a308e69f4eff87331348ac32e8b71f2ca377057fda265135392463aa732e8"
+          ],
+          "libdeberta_attention_layer.so": [
+            "a535a3beb41519b8d5c422a626da57559862dcad781fed13bfd656ad3835a0e6"
+          ],
+          "libshared_fully_connected_layer.so": [
+            "b0f8a43d00fbaa9c720c2fdae96cb3facf20c1682a7d520a61121b0898a096ac"
+          ],
+          "libper_layer_slice_layer.so": [
+            "aab327189770934f435a1516f30ea35be21299e60dbdede960940b2409ee2b99"
+          ],
+          "libgptoss_moe_layer.so": [
+            "e72d2457af2f692cfee35863860ae29275eda888b5f7a1a32e727b46b7ecc7c8"
+          ],
+          "libqwen_moe_layer.so": [
+            "eb4a136343fc3745bbe28ab5f0f0e99456034f13e90c0d20529d84f82e1ebed2"
+          ],
+          "libqwen_moe_layer_fsu.so": [
+            "c57adaa7bd3543db4ce9f1aabdae3d43a64ebe2056faf0ac2e3367d796ac5094"
+          ],
+          "libcached_slim_gptoss_moe_layer.so": [
+            "034254203442b773a05bcbc42b20533cac9941eaba98e68e71470f1169ba9438"
+          ],
+          "libqwen_moe_layer_cached.so": [
+            "4269f754eb25a4f72d69ab4ca0a2604fcb0d6f9111f6df2a0592bfc9b020913b"
+          ],
+          "libm.so.6": [
+            "fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0"
+          ],
+          "libopenblas.so.0": [
+            "bfc7492adbf84a8f567720a9e1fae2afc18f3d817da233e7f4d453683485308e"
+          ],
+          "libgfortran.so.5": [
+            "342618ccfebe840446e4ef2b7893f4161b2084845e570f42d68a70bfde58a58d"
+          ]
+        }
+      },
+      "build_notes": {
+        "symlink_normalization": "Unrelated Applications/SimpleFC/nntrainer trailing slash normalized by archive extraction; target unchanged; runtime blobs match main."
+      },
+      "summary": {
+        "rows": [
+          {
+            "input_tokens": 512,
+            "baseline_latency": {
+              "mean": 34.43233333333333,
+              "sd": 1.127980644041967,
+              "n": 3,
+              "measured": [
+                33.35,
+                35.601,
+                34.346
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "baseline_memory": {
+              "mean": 2872.515625,
+              "sd": 0.29509644047275035,
+              "n": 3,
+              "measured": [
+                2872.85546875,
+                2872.32421875,
+                2872.3671875
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                34,
+                35,
+                37
+              ]
+            },
+            "pyramidkv_latency": {
+              "mean": 33.863,
+              "sd": 0.5479771893062723,
+              "n": 3,
+              "measured": [
+                33.238,
+                34.09,
+                34.261
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "pyramidkv_memory": {
+              "mean": 2873.3489583333335,
+              "sd": 0.4950674258976204,
+              "n": 3,
+              "measured": [
+                2873.640625,
+                2872.77734375,
+                2873.62890625
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                33,
+                34,
+                34
+              ]
+            },
+            "latency_change_pct": -1.653484612331435,
+            "memory_change_pct": 0.029010576168175817
+          },
+          {
+            "input_tokens": 2048,
+            "baseline_latency": {
+              "mean": 64.07066666666667,
+              "sd": 1.0880741396308122,
+              "n": 3,
+              "measured": [
+                65.312,
+                63.282,
+                63.618
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "baseline_memory": {
+              "mean": 2965.046875,
+              "sd": 0.08795570507185704,
+              "n": 3,
+              "measured": [
+                2965.13671875,
+                2964.9609375,
+                2965.04296875
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                61,
+                63,
+                63
+              ]
+            },
+            "pyramidkv_latency": {
+              "mean": 58.53966666666667,
+              "sd": 0.5729540412051661,
+              "n": 3,
+              "measured": [
+                58.392,
+                58.055,
+                59.172
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "pyramidkv_memory": {
+              "mean": 2969.4401041666665,
+              "sd": 0.05915529526875285,
+              "n": 3,
+              "measured": [
+                2969.5078125,
+                2969.3984375,
+                2969.4140625
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                58,
+                58,
+                58
+              ]
+            },
+            "latency_change_pct": -8.63265560943125,
+            "memory_change_pct": 0.1481672753206098
+          },
+          {
+            "input_tokens": 4096,
+            "baseline_latency": {
+              "mean": 146.75633333333334,
+              "sd": 1.9435715405750702,
+              "n": 3,
+              "measured": [
+                148.144,
+                144.535,
+                147.59
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "baseline_memory": {
+              "mean": 3088.4309895833335,
+              "sd": 0.1411845061564683,
+              "n": 3,
+              "measured": [
+                3088.53125,
+                3088.26953125,
+                3088.4921875
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                143,
+                143,
+                142
+              ]
+            },
+            "pyramidkv_latency": {
+              "mean": 110.23666666666666,
+              "sd": 1.1780052348497163,
+              "n": 3,
+              "measured": [
+                110.667,
+                108.904,
+                111.139
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "pyramidkv_memory": {
+              "mean": 3096.8619791666665,
+              "sd": 0.047735163489123336,
+              "n": 3,
+              "measured": [
+                3096.8203125,
+                3096.8515625,
+                3096.9140625
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                107,
+                108,
+                107
+              ]
+            },
+            "latency_change_pct": -24.88455921266317,
+            "memory_change_pct": 0.2729861736191941
+          }
+        ],
+        "overall": {
+          "latency": {
+            "baseline": 81.75311111111111,
+            "pyramidkv": 67.54644444444445,
+            "change_pct": -17.377524198875204
+          },
+          "memory": {
+            "baseline": 2975.3311631944443,
+            "pyramidkv": 2979.8836805555557,
+            "change_pct": 0.15300876142552156
+          }
+        },
+        "actual_decode": {
+          "512": {
+            "baseline": [
+              128
+            ],
+            "pyramidkv": [
+              128
+            ]
+          },
+          "2048": {
+            "baseline": [
+              128
+            ],
+            "pyramidkv": [
+              128
+            ]
+          },
+          "4096": {
+            "baseline": [
+              128
+            ],
+            "pyramidkv": [
+              128
+            ]
+          }
+        }
+      },
+      "trials": [
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-17T23:45:16.239634+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 42286,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 6197,
+          "generation_ms": 26429,
+          "total_ms": 33350,
+          "e2e_ms": 33967,
+          "prefill_tps": 82.6206,
+          "generation_tps": 4.84316,
+          "os_peak_rss_kib": 2919764,
+          "duration_s": 34.123,
+          "log": "logs/latency-512-baseline-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-17T23:45:51.368089+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 42318,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 6277,
+          "generation_ms": 26390,
+          "total_ms": 33238,
+          "e2e_ms": 33809,
+          "prefill_tps": 81.5676,
+          "generation_tps": 4.85032,
+          "os_peak_rss_kib": 2919804,
+          "duration_s": 33.985,
+          "log": "logs/latency-512-pyramidkv-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-17T23:46:26.359199+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 42494,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 6810,
+          "generation_ms": 26700,
+          "total_ms": 34090,
+          "e2e_ms": 34740,
+          "prefill_tps": 75.1836,
+          "generation_tps": 4.79401,
+          "os_peak_rss_kib": 2919844,
+          "duration_s": 34.899,
+          "log": "logs/latency-512-pyramidkv-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-17T23:47:02.265125+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 42614,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 7863,
+          "generation_ms": 27549,
+          "total_ms": 35601,
+          "e2e_ms": 36143,
+          "prefill_tps": 65.1151,
+          "generation_tps": 4.64627,
+          "os_peak_rss_kib": 2918808,
+          "duration_s": 36.374,
+          "log": "logs/latency-512-baseline-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-17T23:47:39.644979+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 42684,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 6325,
+          "generation_ms": 27860,
+          "total_ms": 34346,
+          "e2e_ms": 34935,
+          "prefill_tps": 80.9486,
+          "generation_tps": 4.5944,
+          "os_peak_rss_kib": 2918824,
+          "duration_s": 35.195,
+          "log": "logs/latency-512-baseline-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-17T23:48:15.845051+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 42721,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 6779,
+          "generation_ms": 27223,
+          "total_ms": 34261,
+          "e2e_ms": 34977,
+          "prefill_tps": 75.5274,
+          "generation_tps": 4.70191,
+          "os_peak_rss_kib": 2919840,
+          "duration_s": 35.145,
+          "log": "logs/latency-512-pyramidkv-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-17T23:48:51.997062+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 42778,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 6468,
+          "generation_ms": 27891,
+          "total_ms": 34505,
+          "e2e_ms": 35073,
+          "prefill_tps": 79.1589,
+          "generation_tps": 4.58929,
+          "samples": 34,
+          "sampled_peak_rss_kib": 2941804,
+          "os_peak_rss_kib": 2919348,
+          "duration_s": 35.494,
+          "log": "logs/memory-512-baseline-01.log",
+          "memory_log": "logs/memory-512-baseline-01.log"
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-17T23:49:28.499784+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 43307,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 7049,
+          "generation_ms": 26010,
+          "total_ms": 33264,
+          "e2e_ms": 33823,
+          "prefill_tps": 72.6344,
+          "generation_tps": 4.92118,
+          "samples": 33,
+          "sampled_peak_rss_kib": 2942608,
+          "os_peak_rss_kib": 2919788,
+          "duration_s": 34.439,
+          "log": "logs/memory-512-pyramidkv-01.log",
+          "memory_log": "logs/memory-512-pyramidkv-01.log"
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-17T23:50:03.947195+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 43803,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 7482,
+          "generation_ms": 26753,
+          "total_ms": 34473,
+          "e2e_ms": 35158,
+          "prefill_tps": 68.4309,
+          "generation_tps": 4.78451,
+          "samples": 34,
+          "sampled_peak_rss_kib": 2941724,
+          "os_peak_rss_kib": 2918936,
+          "duration_s": 35.568,
+          "log": "logs/memory-512-pyramidkv-02.log",
+          "memory_log": "logs/memory-512-pyramidkv-02.log"
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-17T23:50:40.522369+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 44332,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 6810,
+          "generation_ms": 27200,
+          "total_ms": 34382,
+          "e2e_ms": 35569,
+          "prefill_tps": 75.1836,
+          "generation_tps": 4.70588,
+          "samples": 35,
+          "sampled_peak_rss_kib": 2941260,
+          "os_peak_rss_kib": 2918772,
+          "duration_s": 36.55,
+          "log": "logs/memory-512-baseline-02.log",
+          "memory_log": "logs/memory-512-baseline-02.log"
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-17T23:51:18.087345+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 44848,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 7206,
+          "generation_ms": 29458,
+          "total_ms": 36947,
+          "e2e_ms": 37631,
+          "prefill_tps": 71.0519,
+          "generation_tps": 4.34517,
+          "samples": 37,
+          "sampled_peak_rss_kib": 2941304,
+          "os_peak_rss_kib": 2918844,
+          "duration_s": 38.759,
+          "log": "logs/memory-512-baseline-03.log",
+          "memory_log": "logs/memory-512-baseline-03.log"
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-17T23:51:57.853860+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 45434,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 7239,
+          "generation_ms": 26924,
+          "total_ms": 34409,
+          "e2e_ms": 34974,
+          "prefill_tps": 70.728,
+          "generation_tps": 4.75412,
+          "samples": 34,
+          "sampled_peak_rss_kib": 2942596,
+          "os_peak_rss_kib": 2919904,
+          "duration_s": 35.504,
+          "log": "logs/memory-512-pyramidkv-03.log",
+          "memory_log": "logs/memory-512-pyramidkv-03.log"
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-17T23:52:34.372154+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 45959,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 32866,
+          "generation_ms": 32162,
+          "total_ms": 65312,
+          "e2e_ms": 65913,
+          "prefill_tps": 62.3136,
+          "generation_tps": 3.97985,
+          "os_peak_rss_kib": 3013720,
+          "duration_s": 66.087,
+          "log": "logs/latency-2048-baseline-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-17T23:53:41.467577+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 46009,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 32430,
+          "generation_ms": 25698,
+          "total_ms": 58392,
+          "e2e_ms": 58937,
+          "prefill_tps": 63.1514,
+          "generation_tps": 4.98093,
+          "os_peak_rss_kib": 3017884,
+          "duration_s": 59.097,
+          "log": "logs/latency-2048-pyramidkv-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-17T23:54:41.579713+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 46058,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 31995,
+          "generation_ms": 25922,
+          "total_ms": 58055,
+          "e2e_ms": 58587,
+          "prefill_tps": 64.01,
+          "generation_tps": 4.93789,
+          "os_peak_rss_kib": 3017828,
+          "duration_s": 58.75,
+          "log": "logs/latency-2048-pyramidkv-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-17T23:55:41.341461+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 46108,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 31560,
+          "generation_ms": 31584,
+          "total_ms": 63282,
+          "e2e_ms": 63782,
+          "prefill_tps": 64.8923,
+          "generation_tps": 4.05268,
+          "os_peak_rss_kib": 3013728,
+          "duration_s": 63.953,
+          "log": "logs/latency-2048-baseline-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-17T23:56:46.308954+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 46154,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 31697,
+          "generation_ms": 31774,
+          "total_ms": 63618,
+          "e2e_ms": 64133,
+          "prefill_tps": 64.6118,
+          "generation_tps": 4.02845,
+          "os_peak_rss_kib": 3013804,
+          "duration_s": 64.292,
+          "log": "logs/latency-2048-baseline-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-17T23:57:51.616172+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 46207,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 32633,
+          "generation_ms": 26395,
+          "total_ms": 59172,
+          "e2e_ms": 59708,
+          "prefill_tps": 62.7586,
+          "generation_tps": 4.8494,
+          "os_peak_rss_kib": 3017852,
+          "duration_s": 59.872,
+          "log": "logs/latency-2048-pyramidkv-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-17T23:58:52.502097+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 46268,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 31039,
+          "generation_ms": 31516,
+          "total_ms": 62695,
+          "e2e_ms": 63218,
+          "prefill_tps": 65.9815,
+          "generation_tps": 4.06143,
+          "samples": 61,
+          "sampled_peak_rss_kib": 3036300,
+          "os_peak_rss_kib": 3013764,
+          "duration_s": 63.536,
+          "log": "logs/memory-2048-baseline-01.log",
+          "memory_log": "logs/memory-2048-baseline-01.log"
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-17T23:59:57.060560+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 47205,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 32946,
+          "generation_ms": 26366,
+          "total_ms": 59450,
+          "e2e_ms": 59965,
+          "prefill_tps": 62.1623,
+          "generation_tps": 4.85474,
+          "samples": 58,
+          "sampled_peak_rss_kib": 3040776,
+          "os_peak_rss_kib": 3017928,
+          "duration_s": 60.437,
+          "log": "logs/memory-2048-pyramidkv-01.log",
+          "memory_log": "logs/memory-2048-pyramidkv-01.log"
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-18T00:00:58.519181+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 48151,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 33002,
+          "generation_ms": 26113,
+          "total_ms": 59352,
+          "e2e_ms": 59883,
+          "prefill_tps": 62.0568,
+          "generation_tps": 4.90177,
+          "samples": 58,
+          "sampled_peak_rss_kib": 3040664,
+          "os_peak_rss_kib": 3017856,
+          "duration_s": 60.429,
+          "log": "logs/memory-2048-pyramidkv-02.log",
+          "memory_log": "logs/memory-2048-pyramidkv-02.log"
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-18T00:01:59.961905+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 49014,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 31834,
+          "generation_ms": 31971,
+          "total_ms": 64018,
+          "e2e_ms": 64584,
+          "prefill_tps": 64.3337,
+          "generation_tps": 4.00363,
+          "samples": 63,
+          "sampled_peak_rss_kib": 3036120,
+          "os_peak_rss_kib": 3013664,
+          "duration_s": 65.624,
+          "log": "logs/memory-2048-baseline-02.log",
+          "memory_log": "logs/memory-2048-baseline-02.log"
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-18T00:03:06.598705+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 49952,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 31929,
+          "generation_ms": 31789,
+          "total_ms": 64188,
+          "e2e_ms": 65101,
+          "prefill_tps": 64.1423,
+          "generation_tps": 4.02655,
+          "samples": 63,
+          "sampled_peak_rss_kib": 3036204,
+          "os_peak_rss_kib": 3013740,
+          "duration_s": 65.721,
+          "log": "logs/memory-2048-baseline-03.log",
+          "memory_log": "logs/memory-2048-baseline-03.log"
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-18T00:04:13.330819+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 50889,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 33061,
+          "generation_ms": 25781,
+          "total_ms": 59106,
+          "e2e_ms": 59885,
+          "prefill_tps": 61.9461,
+          "generation_tps": 4.9649,
+          "samples": 58,
+          "sampled_peak_rss_kib": 3040680,
+          "os_peak_rss_kib": 3017848,
+          "duration_s": 60.423,
+          "log": "logs/memory-2048-pyramidkv-03.log",
+          "memory_log": "logs/memory-2048-pyramidkv-03.log"
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-18T00:05:14.765947+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 51754,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 84058,
+          "generation_ms": 63885,
+          "total_ms": 148144,
+          "e2e_ms": 148756,
+          "prefill_tps": 48.7283,
+          "generation_tps": 2.0036,
+          "os_peak_rss_kib": 3140308,
+          "duration_s": 148.935,
+          "log": "logs/latency-4096-baseline-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-18T00:07:44.715258+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 51858,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 86021,
+          "generation_ms": 24432,
+          "total_ms": 110667,
+          "e2e_ms": 111248,
+          "prefill_tps": 47.6163,
+          "generation_tps": 5.23903,
+          "os_peak_rss_kib": 3148480,
+          "duration_s": 111.457,
+          "log": "logs/latency-4096-pyramidkv-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-18T00:09:37.189069+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 51938,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 83526,
+          "generation_ms": 25092,
+          "total_ms": 108904,
+          "e2e_ms": 109647,
+          "prefill_tps": 49.0386,
+          "generation_tps": 5.10123,
+          "os_peak_rss_kib": 3148416,
+          "duration_s": 109.812,
+          "log": "logs/latency-4096-pyramidkv-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-18T00:11:28.013494+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 52015,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 81679,
+          "generation_ms": 62715,
+          "total_ms": 144535,
+          "e2e_ms": 145107,
+          "prefill_tps": 50.1475,
+          "generation_tps": 2.04098,
+          "os_peak_rss_kib": 3140292,
+          "duration_s": 145.266,
+          "log": "logs/latency-4096-baseline-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-18T00:13:54.296544+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 52105,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 84531,
+          "generation_ms": 62773,
+          "total_ms": 147590,
+          "e2e_ms": 148465,
+          "prefill_tps": 48.4556,
+          "generation_tps": 2.03909,
+          "os_peak_rss_kib": 3140464,
+          "duration_s": 148.628,
+          "log": "logs/latency-4096-baseline-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-18T00:16:23.939519+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 52210,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 85541,
+          "generation_ms": 25326,
+          "total_ms": 111139,
+          "e2e_ms": 111988,
+          "prefill_tps": 47.8835,
+          "generation_tps": 5.05409,
+          "os_peak_rss_kib": 3148416,
+          "duration_s": 112.15,
+          "log": "logs/latency-4096-pyramidkv-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-18T00:18:17.105594+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 52280,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 82628,
+          "generation_ms": 64937,
+          "total_ms": 147706,
+          "e2e_ms": 148257,
+          "prefill_tps": 49.5716,
+          "generation_tps": 1.97114,
+          "samples": 143,
+          "sampled_peak_rss_kib": 3162656,
+          "os_peak_rss_kib": 3140392,
+          "duration_s": 149.311,
+          "log": "logs/memory-4096-baseline-01.log",
+          "memory_log": "logs/memory-4096-baseline-01.log"
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-18T00:20:47.444086+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 54397,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 86025,
+          "generation_ms": 25660,
+          "total_ms": 111877,
+          "e2e_ms": 112475,
+          "prefill_tps": 47.6141,
+          "generation_tps": 4.98831,
+          "samples": 107,
+          "sampled_peak_rss_kib": 3171144,
+          "os_peak_rss_kib": 3148476,
+          "duration_s": 112.871,
+          "log": "logs/memory-4096-pyramidkv-01.log",
+          "memory_log": "logs/memory-4096-pyramidkv-01.log"
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-18T00:22:41.333365+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 55979,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 84526,
+          "generation_ms": 27446,
+          "total_ms": 112141,
+          "e2e_ms": 112665,
+          "prefill_tps": 48.4585,
+          "generation_tps": 4.6637,
+          "samples": 108,
+          "sampled_peak_rss_kib": 3171176,
+          "os_peak_rss_kib": 3148388,
+          "duration_s": 113.083,
+          "log": "logs/memory-4096-pyramidkv-02.log",
+          "memory_log": "logs/memory-4096-pyramidkv-02.log"
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-18T00:24:35.436968+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 57572,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 82727,
+          "generation_ms": 64706,
+          "total_ms": 147872,
+          "e2e_ms": 148939,
+          "prefill_tps": 49.5123,
+          "generation_tps": 1.97818,
+          "samples": 143,
+          "sampled_peak_rss_kib": 3162388,
+          "os_peak_rss_kib": 3140172,
+          "duration_s": 149.345,
+          "log": "logs/memory-4096-baseline-02.log",
+          "memory_log": "logs/memory-4096-baseline-02.log"
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-18T00:27:05.799988+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 59664,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 83510,
+          "generation_ms": 63331,
+          "total_ms": 147196,
+          "e2e_ms": 148415,
+          "prefill_tps": 49.048,
+          "generation_tps": 2.02113,
+          "samples": 142,
+          "sampled_peak_rss_kib": 3162616,
+          "os_peak_rss_kib": 3140272,
+          "duration_s": 149.407,
+          "log": "logs/memory-4096-baseline-03.log",
+          "memory_log": "logs/memory-4096-baseline-03.log"
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-18T00:29:36.224789+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 61745,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 84600,
+          "generation_ms": 24775,
+          "total_ms": 109628,
+          "e2e_ms": 110642,
+          "prefill_tps": 48.4161,
+          "generation_tps": 5.1665,
+          "samples": 107,
+          "sampled_peak_rss_kib": 3171240,
+          "os_peak_rss_kib": 3148516,
+          "duration_s": 111.551,
+          "log": "logs/memory-4096-pyramidkv-03.log",
+          "memory_log": "logs/memory-4096-pyramidkv-03.log"
+        }
+      ]
+    },
+    "windows": {
+      "raw_manifest": "build/validation/pyramidkv-run/performance-windows/windows-comparison.json",
+      "raw_manifest_sha256": "2694c5d88cd64d03dbc0c092ac856369869270a4966c91db0d2483991356d6bb",
+      "protocol": {
+        "conditions": [
+          "baseline",
+          "pyramidkv"
+        ],
+        "context_lengths": [
+          512,
+          2048,
+          4096
+        ],
+        "max_seq_len": 4225,
+        "max_decode_steps": 128,
+        "pyramidkv": {
+          "budget": 256,
+          "window": 64,
+          "kernel": 5,
+          "beta": 20
+        },
+        "batch_size": 1,
+        "repetitions": 3,
+        "interval_seconds": 1,
+        "cpu_affinity": "not pinned",
+        "threads": {
+          "NNTR_NUM_THREADS": 4,
+          "OMP_NUM_THREADS": 4,
+          "OPENBLAS_NUM_THREADS": 1
+        },
+        "asset_sha256": {
+          "model_file_name": "88ffa34cf3c2d5900b62730416aac3f1912df9e8015c6c749f3fd37814bf70ef",
+          "tokenizer_file": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+        },
+        "binary_sha256": {
+          "baseline": "ba42b09ec6315439a8b64fba9647ae9dcfde2a1565663e5c89b0c192584c47b5",
+          "pyramidkv": "d212b13789a9531b2af87943d405d2063eb2ebb4005c820c17333acbf836a177"
+        },
+        "build_options": {
+          "baseline": {
+            "platform": "windows",
+            "buildtype": "release",
+            "enable-transformer": true,
+            "enable-fp16": false,
+            "enable-blas": true,
+            "thread-backend": "omp",
+            "nntr-num-threads": 4,
+            "openblas-num-threads": 1,
+            "enable-opencl": false,
+            "enable-npu": false,
+            "enable-htp": false,
+            "enable-cuda": false
+          },
+          "pyramidkv": {
+            "platform": "windows",
+            "buildtype": "release",
+            "enable-transformer": true,
+            "enable-fp16": false,
+            "enable-blas": true,
+            "thread-backend": "omp",
+            "nntr-num-threads": 4,
+            "openblas-num-threads": 1,
+            "enable-opencl": false,
+            "enable-npu": false,
+            "enable-htp": false,
+            "enable-cuda": false
+          }
+        },
+        "policy": "PyramidKV with GQA scores averaged per KV head",
+        "cache_allocation": "unchanged",
+        "quality": "not evaluated",
+        "evaluation_script_sha256": "524f8e63fe343b1af17683b8929f2f49d51f1f9755b86fd638907228cabf9738"
+      },
+      "environment": {
+        "os": "Windows-11-10.0.26200-SP0",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 140 Stepping 1, GenuineIntel",
+        "logical_cpus": 8,
+        "python": "3.12.9 (tags/v3.12.9:fdb8142, Feb  4 2025, 15:27:58) [MSC v.1942 64 bit (AMD64)]",
+        "runtime_controls": {
+          "baseline": {
+            "NNTR_ENGINE": "cpu",
+            "OMP_NUM_THREADS": "4",
+            "NNTR_NUM_THREADS": "4",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "pyramidkv": {
+            "NNTR_ENGINE": "cpu",
+            "OMP_NUM_THREADS": "4",
+            "NNTR_NUM_THREADS": "4",
+            "OPENBLAS_NUM_THREADS": "1"
+          }
+        }
+      },
+      "compiler": {
+        "id": "gcc",
+        "exelist": [
+          "C:\\MinGW\\bin\\g++.exe"
+        ],
+        "linker_exelist": [
+          "C:\\MinGW\\bin\\g++.exe"
+        ],
+        "file_suffixes": [
+          "cpp",
+          "cppm",
+          "cc",
+          "cxx",
+          "c++",
+          "hh",
+          "hpp",
+          "ipp",
+          "hxx",
+          "ino",
+          "ixx",
+          "C",
+          "H"
+        ],
+        "default_suffix": "cpp",
+        "version": "13.2.0",
+        "full_version": "g++.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders) 13.2.0",
+        "linker_id": "ld.bfd"
+      },
+      "runtime_library_sha256": {
+        "baseline": {
+          "libcausal_conv1d_layer.dll": [
+            "7b9df81d14aa5d471185a6f30da7f01d9cad9166cd91d754a39b50469ac613f8"
+          ],
+          "libcustom_multiply.dll": [
+            "0055ab6623bf85a7747968974452d9b16fcb5795f513470d8e7c4fa09dbb3355"
+          ],
+          "libdeberta_attention_layer.dll": [
+            "9dd8eaacba3c1693fe1933cba7708dc34b950b2260665e5ef0c92e817731160a"
+          ],
+          "libembedding_layer.dll": [
+            "7edfb35352ef9017f074fb803bd22e36da3112bcc014b839ff1ffcc22af2f65a"
+          ],
+          "libembedding_normalize_layer.dll": [
+            "4108135961502fcb2964de47aa8efd8999170810127b92c6b232b564b92b0fd7"
+          ],
+          "libembedding_pooling_layer.dll": [
+            "692bed22eaf3f5accfa8389ffa54a8082363ac7bc70a9d389f60686e0287c544"
+          ],
+          "libmha_core_layer.dll": [
+            "230b928510f7e12e649cfc1d3cf84f5e21c975785fd3e2cab6e8559377a240e2"
+          ],
+          "libper_layer_slice_layer.dll": [
+            "45d046a9285c0c833148dc833a9fb5acb0eb1e3e92a9f7eac633dbc8a2775756"
+          ],
+          "libreshaped_rms_norm_layer.dll": [
+            "751beab53e785e695d10cf392a951980a1e024cc6a7c3a7b8e3f36313b7f5a5b"
+          ],
+          "librms_norm_gpu_layer.dll": [
+            "78273fb6fb8b250d85b81f0cddc7b743891017eb5c1dea87b5acda982a031b94"
+          ],
+          "librms_norm_layer.dll": [
+            "46e735612185299403e1e0fda0abf86ea0273de77e01dd1962afae2613c66182"
+          ],
+          "librms_reverse_norm_layer.dll": [
+            "ed7d53cb76c623e27daac18bbbe580104491dd88afe8a136c896887284401805"
+          ],
+          "libshared_fully_connected_layer.dll": [
+            "18ab7b919859df68abec6b8b26960f8cf189a14ad6bdf77aa1a8f861089d3ef8"
+          ],
+          "libgptoss_moe_layer.dll": [
+            "30e2a2ad588fdc6f71ddc955106451c1538c78d6cba288fd762de60ca8801962"
+          ],
+          "libqwen_moe_layer.dll": [
+            "f8de04569574078c721dc2a5931fc4831345b7e6eba53659dfce8c7d9067c232"
+          ],
+          "libqwen_moe_layer_fsu.dll": [
+            "1598069dfb96077a84d557148c28e632dbc18f787abdebb012b670ba55342e22"
+          ],
+          "libgcc_s_seh-1.dll": [
+            "26876adaecf7d3d80ee0fa2eb558de91d649eec9e7454342f18e6e8fe971ae2e"
+          ],
+          "libgfortran-5.dll": [
+            "fe8611311d5e4d1b54c424edd262d568591ca85832a660b0a285759a442eab39"
+          ],
+          "libgomp-1.dll": [
+            "df70c59f5969aeef11be1ad5d2543d802df0fee2fa2b4413cbc0014a16d34ca1"
+          ],
+          "libopenblas.dll": [
+            "bd5f951ac92b33ef78fabde5b9bbc045af33f2be4e1c990def89f453a9fb173f"
+          ],
+          "libquadmath-0.dll": [
+            "c6f21c63173e1993b6d660558f6e6b75580defd12a2a6166029f5846cd453997"
+          ],
+          "libstdc++-6.dll": [
+            "b0a828ac0411867e2f293259c0f37a331369208dae06005fe21c8f6a728a8234"
+          ],
+          "libwinpthread-1.dll": [
+            "eb0118d63bc9c64818d61aa2986280f49d5cdf120c0b8fc96ce24a3990bf2c84"
+          ],
+          "libnntrainer.dll": [
+            "c936c5cdbdb95c64a0710d13f350f1b23c330e605c4c8315b2fa1b7fcf06aabf"
+          ]
+        },
+        "pyramidkv": {
+          "libcausal_conv1d_layer.dll": [
+            "f632f73bb6574261beaf1e62938ae7adc6efb356e2cd60687eb60a34392c29f4"
+          ],
+          "libcustom_multiply.dll": [
+            "a41e4be5d50f443df7193b28b405c6385e114894b87356860dcf6dc9cdba6c22"
+          ],
+          "libdeberta_attention_layer.dll": [
+            "5c943e7bbc962acc3a7efe261e43a357e27583d3b2b432111464d5dade053d6d"
+          ],
+          "libembedding_layer.dll": [
+            "7a1400eb975dff583139797675f409abcae55112eb43e516ada2b157106e6e7c"
+          ],
+          "libembedding_normalize_layer.dll": [
+            "7f54b6c242d044ab7af076cf2784d7d9ea41825308006d8882043e5a378bc00c"
+          ],
+          "libembedding_pooling_layer.dll": [
+            "88b86723ca9c2b2e3ae4d9ef5f2b105ba9ab2881cc3d9f9796ea3e2ec6811c10"
+          ],
+          "libmha_core_layer.dll": [
+            "a6cfe58f416357f050e9b20172060c069d528087e177dea93729199edb857be0"
+          ],
+          "libper_layer_slice_layer.dll": [
+            "4c0807f3d79da7f265e2db483c081c8c0c88cebb097ce08bf46df16be5a545ef"
+          ],
+          "libreshaped_rms_norm_layer.dll": [
+            "89ac435d5c1ac5aa3cdc2678b185b14ad7bede2b7991d5d056f35a00682701c4"
+          ],
+          "librms_norm_gpu_layer.dll": [
+            "72749e7be2dd59a440daa8ff22b968aea9f936b2fd93a458433e6e42e3ed8bdb"
+          ],
+          "librms_norm_layer.dll": [
+            "2f994c543b104dc4eb2e8f0c0c3d40040a26371cd98ac8f101f8476e0f54e070"
+          ],
+          "librms_reverse_norm_layer.dll": [
+            "f35c82f522ffcabdb95dc6bb19e2bccde0d8f09de11f272b5f837d6ddd32c00c"
+          ],
+          "libshared_fully_connected_layer.dll": [
+            "1d356debb57188052841c17ddfa644e546fbb278d8d0955d902d4250ada755f2"
+          ],
+          "libgptoss_moe_layer.dll": [
+            "6c5ed6c47457ab445841ad5927e0929ebd30ddabefd717d6f38541eeb29c500d"
+          ],
+          "libqwen_moe_layer.dll": [
+            "43c848a4c7305f4f523dbfb5dc3ce78a17e0f23a1fc9fd250ddab2f5677c3b26"
+          ],
+          "libqwen_moe_layer_fsu.dll": [
+            "110f23af3b7849fd3013d115a6035ca942550d58e73e3abf4ab88d25cfc1e239"
+          ],
+          "libgcc_s_seh-1.dll": [
+            "26876adaecf7d3d80ee0fa2eb558de91d649eec9e7454342f18e6e8fe971ae2e"
+          ],
+          "libgfortran-5.dll": [
+            "fe8611311d5e4d1b54c424edd262d568591ca85832a660b0a285759a442eab39"
+          ],
+          "libgomp-1.dll": [
+            "df70c59f5969aeef11be1ad5d2543d802df0fee2fa2b4413cbc0014a16d34ca1"
+          ],
+          "libopenblas.dll": [
+            "bd5f951ac92b33ef78fabde5b9bbc045af33f2be4e1c990def89f453a9fb173f"
+          ],
+          "libquadmath-0.dll": [
+            "c6f21c63173e1993b6d660558f6e6b75580defd12a2a6166029f5846cd453997"
+          ],
+          "libstdc++-6.dll": [
+            "b0a828ac0411867e2f293259c0f37a331369208dae06005fe21c8f6a728a8234"
+          ],
+          "libwinpthread-1.dll": [
+            "eb0118d63bc9c64818d61aa2986280f49d5cdf120c0b8fc96ce24a3990bf2c84"
+          ],
+          "libnntrainer.dll": [
+            "c936c5cdbdb95c64a0710d13f350f1b23c330e605c4c8315b2fa1b7fcf06aabf"
+          ]
+        }
+      },
+      "build_notes": {
+        "build_strategy": "Fresh CausalLM feature objects and executable; verified identical main core DLL/import library reused",
+        "exit_adapter": "Same original-main-return adapter as baseline; model/local cleanup runs before TerminateProcess; DLL global shutdown excluded",
+        "core_library_reused": true,
+        "core_library_proof": "windows-core-cache-proof.json"
+      },
+      "summary": {
+        "rows": [
+          {
+            "input_tokens": 512,
+            "baseline_latency": {
+              "mean": 44.867333333333335,
+              "sd": 0.6990224126115919,
+              "n": 3,
+              "measured": [
+                45.516,
+                44.959,
+                44.127
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "baseline_memory": {
+              "mean": 2918.8268229166665,
+              "sd": 13.259814004720377,
+              "n": 3,
+              "measured": [
+                2909.83203125,
+                2934.0546875,
+                2912.59375
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                890,
+                907,
+                900
+              ]
+            },
+            "pyramidkv_latency": {
+              "mean": 40.761,
+              "sd": 1.3020418580061068,
+              "n": 3,
+              "measured": [
+                41.545,
+                39.258,
+                41.48
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "pyramidkv_memory": {
+              "mean": 2887.8255208333335,
+              "sd": 26.20850320911592,
+              "n": 3,
+              "measured": [
+                2917.578125,
+                2868.15625,
+                2877.7421875
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                823,
+                779,
+                809
+              ]
+            },
+            "latency_change_pct": -9.152167129760326,
+            "memory_change_pct": -1.0621151566763576
+          },
+          {
+            "input_tokens": 2048,
+            "baseline_latency": {
+              "mean": 114.432,
+              "sd": 1.3257254617755518,
+              "n": 3,
+              "measured": [
+                115.468,
+                114.89,
+                112.938
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "baseline_memory": {
+              "mean": 2955.8111979166665,
+              "sd": 0.787129568341052,
+              "n": 3,
+              "measured": [
+                2956.2734375,
+                2954.90234375,
+                2956.2578125
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                2277,
+                2280,
+                2313
+              ]
+            },
+            "pyramidkv_latency": {
+              "mean": 96.81766666666667,
+              "sd": 0.7304973191828527,
+              "n": 3,
+              "measured": [
+                97.072,
+                95.994,
+                97.387
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "pyramidkv_memory": {
+              "mean": 2956.54296875,
+              "sd": 0.36353317877507757,
+              "n": 3,
+              "measured": [
+                2956.9140625,
+                2956.1875,
+                2956.52734375
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                1941,
+                1919,
+                1955
+              ]
+            },
+            "latency_change_pct": -15.392838832960475,
+            "memory_change_pct": 0.024757022161936426
+          },
+          {
+            "input_tokens": 4096,
+            "baseline_latency": {
+              "mean": 257.935,
+              "sd": 4.837551033322544,
+              "n": 3,
+              "measured": [
+                255.515,
+                254.785,
+                263.505
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "baseline_memory": {
+              "mean": 3082.34375,
+              "sd": 5.83069674534123,
+              "n": 3,
+              "measured": [
+                3078.203125,
+                3089.01171875,
+                3079.81640625
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                4669,
+                4760,
+                4828
+              ]
+            },
+            "pyramidkv_latency": {
+              "mean": 225.72566666666665,
+              "sd": 1.7337122983163489,
+              "n": 3,
+              "measured": [
+                226.699,
+                226.754,
+                223.724
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": null
+            },
+            "pyramidkv_memory": {
+              "mean": 3085.5794270833335,
+              "sd": 5.099974528729031,
+              "n": 3,
+              "measured": [
+                3088.18359375,
+                3088.8515625,
+                3079.703125
+              ],
+              "actual_decode_tokens": [
+                128,
+                128,
+                128
+              ],
+              "samples": [
+                4307,
+                4062,
+                4070
+              ]
+            },
+            "latency_change_pct": -12.487383772397443,
+            "memory_change_pct": 0.10497456954090545
+          }
+        ],
+        "overall": {
+          "latency": {
+            "baseline": 139.07811111111113,
+            "pyramidkv": 121.10144444444444,
+            "change_pct": -12.925590175944313
+          },
+          "memory": {
+            "baseline": 2985.660590277778,
+            "pyramidkv": 2976.6493055555557,
+            "change_pct": -0.3018187918467863
+          }
+        },
+        "actual_decode": {
+          "512": {
+            "baseline": [
+              128
+            ],
+            "pyramidkv": [
+              128
+            ]
+          },
+          "2048": {
+            "baseline": [
+              128
+            ],
+            "pyramidkv": [
+              128
+            ]
+          },
+          "4096": {
+            "baseline": [
+              128
+            ],
+            "pyramidkv": [
+              128
+            ]
+          }
+        }
+      },
+      "trials": [
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-18T00:33:16.796222+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 13172,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 11869,
+          "generation_ms": 33497,
+          "total_ms": 45516,
+          "e2e_ms": 46140,
+          "prefill_tps": 43.1376,
+          "generation_tps": 3.82124,
+          "duration_s": 46.531,
+          "log": "logs\\latency-512-baseline-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-18T00:34:04.388259+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 42168,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 13389,
+          "generation_ms": 27987,
+          "total_ms": 41545,
+          "e2e_ms": 42224,
+          "prefill_tps": 38.2403,
+          "generation_tps": 4.57355,
+          "duration_s": 42.547,
+          "log": "logs\\latency-512-pyramidkv-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-18T00:34:47.972864+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 27512,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 11800,
+          "generation_ms": 27353,
+          "total_ms": 39258,
+          "e2e_ms": 39936,
+          "prefill_tps": 43.3898,
+          "generation_tps": 4.67956,
+          "duration_s": 40.25,
+          "log": "logs\\latency-512-pyramidkv-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-18T00:35:29.271717+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 40236,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 13295,
+          "generation_ms": 31534,
+          "total_ms": 44959,
+          "e2e_ms": 45603,
+          "prefill_tps": 38.5107,
+          "generation_tps": 4.05911,
+          "duration_s": 45.922,
+          "log": "logs\\latency-512-baseline-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-18T00:36:16.251270+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 8392,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 11545,
+          "generation_ms": 32467,
+          "total_ms": 44127,
+          "e2e_ms": 44761,
+          "prefill_tps": 44.3482,
+          "generation_tps": 3.94246,
+          "duration_s": 45.094,
+          "log": "logs\\latency-512-baseline-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-18T00:37:02.408559+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 44504,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 13301,
+          "generation_ms": 28033,
+          "total_ms": 41480,
+          "e2e_ms": 42117,
+          "prefill_tps": 38.4933,
+          "generation_tps": 4.56605,
+          "duration_s": 42.5,
+          "log": "logs\\latency-512-pyramidkv-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-18T00:37:45.967225+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 41612,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 11887,
+          "generation_ms": 32480,
+          "total_ms": 44467,
+          "e2e_ms": 45137,
+          "prefill_tps": 43.0723,
+          "generation_tps": 3.94089,
+          "samples": 890,
+          "sampled_peak_working_set_kib": 2979668.0,
+          "observed_os_peak_working_set_kib": 3000536.0,
+          "duration_s": 45.547,
+          "log": "logs\\memory-512-baseline-01.log",
+          "memory_log": "logs\\memory-512-baseline-01-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-18T00:38:32.574208+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 12688,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 13128,
+          "generation_ms": 27798,
+          "total_ms": 41045,
+          "e2e_ms": 41679,
+          "prefill_tps": 39.0006,
+          "generation_tps": 4.60465,
+          "samples": 823,
+          "sampled_peak_working_set_kib": 2987600.0,
+          "observed_os_peak_working_set_kib": 2999696.0,
+          "duration_s": 42.093,
+          "log": "logs\\memory-512-pyramidkv-01.log",
+          "memory_log": "logs\\memory-512-pyramidkv-01-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-18T00:39:15.718985+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 23208,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 11484,
+          "generation_ms": 27226,
+          "total_ms": 38824,
+          "e2e_ms": 39480,
+          "prefill_tps": 44.5838,
+          "generation_tps": 4.70139,
+          "samples": 779,
+          "sampled_peak_working_set_kib": 2936992.0,
+          "observed_os_peak_working_set_kib": 3005464.0,
+          "duration_s": 39.906,
+          "log": "logs\\memory-512-pyramidkv-02.log",
+          "memory_log": "logs\\memory-512-pyramidkv-02-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-18T00:39:56.691286+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 34960,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 12557,
+          "generation_ms": 32733,
+          "total_ms": 45411,
+          "e2e_ms": 46051,
+          "prefill_tps": 40.7741,
+          "generation_tps": 3.91043,
+          "samples": 907,
+          "sampled_peak_working_set_kib": 3004472.0,
+          "observed_os_peak_working_set_kib": 3023112.0,
+          "duration_s": 46.39,
+          "log": "logs\\memory-512-baseline-02.log",
+          "memory_log": "logs\\memory-512-baseline-02-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-18T00:40:44.138247+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 8188,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 11986,
+          "generation_ms": 32850,
+          "total_ms": 44971,
+          "e2e_ms": 45603,
+          "prefill_tps": 42.7165,
+          "generation_tps": 3.8965,
+          "samples": 900,
+          "sampled_peak_working_set_kib": 2982496.0,
+          "observed_os_peak_working_set_kib": 3019536.0,
+          "duration_s": 46.015,
+          "log": "logs\\memory-512-baseline-03.log",
+          "memory_log": "logs\\memory-512-baseline-03-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 512,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-18T00:41:31.223987+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 26516,
+          "prefill_tokens": 512,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 12645,
+          "generation_ms": 27651,
+          "total_ms": 40426,
+          "e2e_ms": 41038,
+          "prefill_tps": 40.4903,
+          "generation_tps": 4.62913,
+          "samples": 809,
+          "sampled_peak_working_set_kib": 2946808.0,
+          "observed_os_peak_working_set_kib": 3018832.0,
+          "duration_s": 41.39,
+          "log": "logs\\memory-512-pyramidkv-03.log",
+          "memory_log": "logs\\memory-512-pyramidkv-03-working-set.csv"
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-18T00:42:13.665691+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 11628,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 69144,
+          "generation_ms": 46192,
+          "total_ms": 115468,
+          "e2e_ms": 116087,
+          "prefill_tps": 29.6193,
+          "generation_tps": 2.77104,
+          "duration_s": 116.437,
+          "log": "logs\\latency-2048-baseline-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-18T00:44:11.177581+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 43296,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 70202,
+          "generation_ms": 26769,
+          "total_ms": 97072,
+          "e2e_ms": 97757,
+          "prefill_tps": 29.173,
+          "generation_tps": 4.78165,
+          "duration_s": 98.046,
+          "log": "logs\\latency-2048-pyramidkv-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-18T00:45:50.298254+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 25524,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 68761,
+          "generation_ms": 27093,
+          "total_ms": 95994,
+          "e2e_ms": 96620,
+          "prefill_tps": 29.7843,
+          "generation_tps": 4.72447,
+          "duration_s": 96.906,
+          "log": "logs\\latency-2048-pyramidkv-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-18T00:47:28.266693+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 31296,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 68359,
+          "generation_ms": 46386,
+          "total_ms": 114890,
+          "e2e_ms": 115514,
+          "prefill_tps": 29.9595,
+          "generation_tps": 2.75945,
+          "duration_s": 115.859,
+          "log": "logs\\latency-2048-baseline-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-18T00:49:25.180087+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 33624,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 69619,
+          "generation_ms": 43208,
+          "total_ms": 112938,
+          "e2e_ms": 113581,
+          "prefill_tps": 29.4173,
+          "generation_tps": 2.96241,
+          "duration_s": 113.922,
+          "log": "logs\\latency-2048-baseline-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-18T00:51:20.150988+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 20804,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 70233,
+          "generation_ms": 27031,
+          "total_ms": 97387,
+          "e2e_ms": 98041,
+          "prefill_tps": 29.1601,
+          "generation_tps": 4.7353,
+          "duration_s": 98.344,
+          "log": "logs\\latency-2048-pyramidkv-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-18T00:52:59.574373+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 32532,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 69197,
+          "generation_ms": 46114,
+          "total_ms": 115427,
+          "e2e_ms": 116082,
+          "prefill_tps": 29.5967,
+          "generation_tps": 2.77573,
+          "samples": 2277,
+          "sampled_peak_working_set_kib": 3027224.0,
+          "observed_os_peak_working_set_kib": 3027224.0,
+          "duration_s": 116.422,
+          "log": "logs\\memory-2048-baseline-01.log",
+          "memory_log": "logs\\memory-2048-baseline-01-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-18T00:54:57.062755+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 26180,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 71822,
+          "generation_ms": 26358,
+          "total_ms": 98285,
+          "e2e_ms": 98946,
+          "prefill_tps": 28.5149,
+          "generation_tps": 4.85621,
+          "samples": 1941,
+          "sampled_peak_working_set_kib": 3027880.0,
+          "observed_os_peak_working_set_kib": 3027880.0,
+          "duration_s": 99.218,
+          "log": "logs\\memory-2048-pyramidkv-01.log",
+          "memory_log": "logs\\memory-2048-pyramidkv-01-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-18T00:56:37.342601+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 42544,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 70125,
+          "generation_ms": 26594,
+          "total_ms": 96935,
+          "e2e_ms": 97805,
+          "prefill_tps": 29.205,
+          "generation_tps": 4.81312,
+          "samples": 1919,
+          "sampled_peak_working_set_kib": 3027136.0,
+          "observed_os_peak_working_set_kib": 3027136.0,
+          "duration_s": 98.125,
+          "log": "logs\\memory-2048-pyramidkv-02.log",
+          "memory_log": "logs\\memory-2048-pyramidkv-02-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-18T00:58:16.521971+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 40360,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 68365,
+          "generation_ms": 47092,
+          "total_ms": 115592,
+          "e2e_ms": 116205,
+          "prefill_tps": 29.9568,
+          "generation_tps": 2.71808,
+          "samples": 2280,
+          "sampled_peak_working_set_kib": 3025820.0,
+          "observed_os_peak_working_set_kib": 3025820.0,
+          "duration_s": 116.562,
+          "log": "logs\\memory-2048-baseline-02.log",
+          "memory_log": "logs\\memory-2048-baseline-02-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-18T01:00:14.141524+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 31928,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 70001,
+          "generation_ms": 47131,
+          "total_ms": 117243,
+          "e2e_ms": 117861,
+          "prefill_tps": 29.2567,
+          "generation_tps": 2.71583,
+          "samples": 2313,
+          "sampled_peak_working_set_kib": 3027208.0,
+          "observed_os_peak_working_set_kib": 3027208.0,
+          "duration_s": 118.203,
+          "log": "logs\\memory-2048-baseline-03.log",
+          "memory_log": "logs\\memory-2048-baseline-03-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 2048,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-18T01:02:13.406140+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 24492,
+          "prefill_tokens": 2048,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 71687,
+          "generation_ms": 27143,
+          "total_ms": 98967,
+          "e2e_ms": 99600,
+          "prefill_tps": 28.5686,
+          "generation_tps": 4.71576,
+          "samples": 1955,
+          "sampled_peak_working_set_kib": 3027484.0,
+          "observed_os_peak_working_set_kib": 3027484.0,
+          "duration_s": 99.922,
+          "log": "logs\\memory-2048-pyramidkv-03.log",
+          "memory_log": "logs\\memory-2048-pyramidkv-03-working-set.csv"
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-18T01:03:54.396425+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 13628,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 197480,
+          "generation_ms": 57883,
+          "total_ms": 255515,
+          "e2e_ms": 256142,
+          "prefill_tps": 20.7413,
+          "generation_tps": 2.21136,
+          "duration_s": 256.469,
+          "log": "logs\\latency-4096-baseline-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-18T01:08:11.940945+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 23416,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 199678,
+          "generation_ms": 26910,
+          "total_ms": 226699,
+          "e2e_ms": 227339,
+          "prefill_tps": 20.513,
+          "generation_tps": 4.7566,
+          "duration_s": 227.671,
+          "log": "logs\\latency-4096-pyramidkv-01.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-18T01:12:00.667138+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 37100,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 199989,
+          "generation_ms": 26639,
+          "total_ms": 226754,
+          "e2e_ms": 227404,
+          "prefill_tps": 20.4811,
+          "generation_tps": 4.80499,
+          "duration_s": 227.687,
+          "log": "logs\\latency-4096-pyramidkv-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-18T01:15:49.423950+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 23136,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 196962,
+          "generation_ms": 57697,
+          "total_ms": 254785,
+          "e2e_ms": 255431,
+          "prefill_tps": 20.7959,
+          "generation_tps": 2.21849,
+          "duration_s": 255.781,
+          "log": "logs\\latency-4096-baseline-02.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-18T01:20:06.277061+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 15072,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 198284,
+          "generation_ms": 65015,
+          "total_ms": 263505,
+          "e2e_ms": 264408,
+          "prefill_tps": 20.6572,
+          "generation_tps": 1.96878,
+          "duration_s": 264.703,
+          "log": "logs\\latency-4096-baseline-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "latency",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-18T01:24:32.046067+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 23228,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 199178,
+          "generation_ms": 24419,
+          "total_ms": 223724,
+          "e2e_ms": 224364,
+          "prefill_tps": 20.5645,
+          "generation_tps": 5.24182,
+          "duration_s": 224.578,
+          "log": "logs\\latency-4096-pyramidkv-03.log",
+          "memory_log": ""
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 1,
+          "position": 1,
+          "started_at": "2026-10-18T01:28:17.772428+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 36928,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 181191,
+          "generation_ms": 56140,
+          "total_ms": 237446,
+          "e2e_ms": 238080,
+          "prefill_tps": 22.606,
+          "generation_tps": 2.28001,
+          "samples": 4669,
+          "sampled_peak_working_set_kib": 3152080.0,
+          "observed_os_peak_working_set_kib": 3152084.0,
+          "duration_s": 238.484,
+          "log": "logs\\memory-4096-baseline-01.log",
+          "memory_log": "logs\\memory-4096-baseline-01-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-18T01:32:17.323792+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 3428,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 194624,
+          "generation_ms": 24378,
+          "total_ms": 219146,
+          "e2e_ms": 219942,
+          "prefill_tps": 21.0457,
+          "generation_tps": 5.25064,
+          "samples": 4307,
+          "sampled_peak_working_set_kib": 3162300.0,
+          "observed_os_peak_working_set_kib": 3162300.0,
+          "duration_s": 220.266,
+          "log": "logs\\memory-4096-pyramidkv-01.log",
+          "memory_log": "logs\\memory-4096-pyramidkv-01-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-18T01:35:58.673334+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 26876,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 180626,
+          "generation_ms": 24631,
+          "total_ms": 205377,
+          "e2e_ms": 206117,
+          "prefill_tps": 22.6767,
+          "generation_tps": 5.1967,
+          "samples": 4062,
+          "sampled_peak_working_set_kib": 3162984.0,
+          "observed_os_peak_working_set_kib": 3162984.0,
+          "duration_s": 208.0,
+          "log": "logs\\memory-4096-pyramidkv-02.log",
+          "memory_log": "logs\\memory-4096-pyramidkv-02-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-18T01:39:27.756292+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 39824,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 180139,
+          "generation_ms": 60591,
+          "total_ms": 240854,
+          "e2e_ms": 241494,
+          "prefill_tps": 22.738,
+          "generation_tps": 2.11252,
+          "samples": 4760,
+          "sampled_peak_working_set_kib": 3163148.0,
+          "observed_os_peak_working_set_kib": 3163148.0,
+          "duration_s": 243.703,
+          "log": "logs\\memory-4096-baseline-02.log",
+          "memory_log": "logs\\memory-4096-baseline-02-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-18T01:43:32.529399+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 24172,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 182661,
+          "generation_ms": 62844,
+          "total_ms": 245655,
+          "e2e_ms": 246274,
+          "prefill_tps": 22.4241,
+          "generation_tps": 2.03679,
+          "samples": 4828,
+          "sampled_peak_working_set_kib": 3153732.0,
+          "observed_os_peak_working_set_kib": 3153732.0,
+          "duration_s": 246.656,
+          "log": "logs\\memory-4096-baseline-03.log",
+          "memory_log": "logs\\memory-4096-baseline-03-working-set.csv"
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "pyramidkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-18T01:47:40.273933+09:00",
+          "valid": true,
+          "failure": "",
+          "target_pid": 3780,
+          "prefill_tokens": 4096,
+          "generation_tokens": 128,
+          "early_eos": false,
+          "prefill_ms": 182527,
+          "generation_ms": 23907,
+          "total_ms": 206632,
+          "e2e_ms": 207515,
+          "prefill_tps": 22.4405,
+          "generation_tps": 5.35408,
+          "samples": 4070,
+          "sampled_peak_working_set_kib": 3153616.0,
+          "observed_os_peak_working_set_kib": 3153616.0,
+          "duration_s": 207.86,
+          "log": "logs\\memory-4096-pyramidkv-03.log",
+          "memory_log": "logs\\memory-4096-pyramidkv-03-working-set.csv"
+        }
+      ]
+    }
+  }
+}

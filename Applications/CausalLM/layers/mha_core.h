@@ -39,6 +39,7 @@
 #include <cpu_backend.h>
 #include <layer_impl.h>
 #include <limits.h>
+#include <pyramidkv.h>
 #include <util_simd.h>
 
 #include <map>
@@ -521,6 +522,8 @@ private:
 
   float epsilon;            /** to avoid overflow */
   unsigned int cache_index; /** idx of kv cache */
+  PyramidKVState
+    pyramidkv_; /** Optional online KV eviction, local to this layer. */
 
   /**
    * @brief Honor the LayerImpl `skip_prefill` property. Gemma4 KV-shared
