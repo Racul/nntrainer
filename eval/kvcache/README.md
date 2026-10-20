@@ -46,7 +46,7 @@ The protocol follows the project metric definition, with real benchmark text as 
 - at most 128 decode steps (`init_seq_len = prompt + 1`, as for quality); cache capacity 2,048 + 128 = 2,176, kept even when only some lengths are measured so the KV allocation stays comparable;
 - original sampling and EOS, batch one, NNTR/OMP four threads, OpenBLAS one thread, Linux `taskset` `0,2,4,6`;
 - one function check per condition, excluded from statistics;
-- per input and condition, 5 latency trials, then 5 memory trials in separate processes, condition order rotated per trial, 1 s between trials, no warm-up.
+- per input and condition, 3 latency trials, then 3 memory trials in separate processes (`--repeat`), condition order rotated per trial, 1 s between trials, no warm-up.
 
 ```bash
 python3 eval/kvcache/kvcache_eval.py perf --model models/qwen3-fp32-main \

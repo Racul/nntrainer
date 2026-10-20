@@ -910,7 +910,7 @@ def main():
     perf.add_argument("--contexts", default="512,1024,2048", help="comma-separated prompt token limits")
     perf.add_argument("--n-gen", type=int, default=128, help="maximum decode steps (default 128)")
     perf.add_argument("--max-seq-len", type=int, help="cache capacity (default: max(2048, longest limit) + n-gen)")
-    perf.add_argument("--repeat", type=int, default=5, help="latency and memory trials each (default 5)")
+    perf.add_argument("--repeat", type=int, default=3, help="latency and memory trials each (default 3)")
     perf.add_argument("--interval", type=float, default=1.0, help="seconds between trials (default 1)")
 
     summary = commands.add_parser("report", help="rewrite summary.md from records")
