@@ -399,6 +399,68 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
     SAMPLING_SEED = causallm::kDefaultSamplingSeed;
   rng.seed(SAMPLING_SEED);
   global_token_len = 0;
+
+  entrokv_properties_.clear();
+  if (nntr_cfg.contains("entrokv")) {
+    const auto &settings = nntr_cfg.at("entrokv");
+    if (!settings.is_object())
+      throw std::invalid_argument("EntroKV: configuration must be an object");
+    EntroKVConfig config;
+    for (const auto &entry : settings.items()) {
+      const auto &name = entry.key();
+      const auto &value = entry.value();
+      if (name == "window" || name == "kernel") {
+        if (!value.is_number_integer() || value < 0 ||
+            value > std::numeric_limits<unsigned int>::max())
+          throw std::invalid_argument("EntroKV: invalid integer " + name);
+        if (name == "window")
+          config.window = value.get<unsigned int>();
+        else
+          config.kernel = value.get<unsigned int>();
+      } else if (name == "beta" || name == "alpha" ||
+                 name == "baseline_entropy") {
+        if (!value.is_number())
+          throw std::invalid_argument("EntroKV: invalid number " + name);
+        if (name == "beta")
+          config.beta = value.get<double>();
+        else if (name == "alpha")
+          config.alpha = value.get<double>();
+        else {
+          config.baseline_entropy = value.get<double>();
+          config.calibrated = true;
+        }
+      } else {
+        throw std::invalid_argument("EntroKV: unknown setting " + name);
+      }
+    }
+    config.validate();
+    if (config.enabled()) {
+      const bool fp32_activation =
+        MODEL_TENSOR_TYPE == "FP32" ||
+        (MODEL_TENSOR_TYPE.size() >= 5 &&
+         MODEL_TENSOR_TYPE.compare(MODEL_TENSOR_TYPE.size() - 5, 5, "-FP32") ==
+           0);
+      if (cfg.value("model_type", std::string()) != "qwen3" ||
+          !fp32_activation || BATCH_SIZE != 1 || SKIP_PREFILL || USE_KVCACHE ||
+          NUM_HEADS <= 0 || NUM_KEY_VALUE_HEADS <= 0 ||
+          NUM_HEADS % NUM_KEY_VALUE_HEADS != 0 || causallm_engine() != "cpu" ||
+          std::getenv("NNTR_KV_INT8") != nullptr)
+        throw std::invalid_argument(
+          "EntroKV: requires dense Qwen3, CPU FP32 activations, batch 1, "
+          "compatible GQA, no skip-prefill/saved-cache/int8-KV");
+      for (const char *method : {"snapkv", "h2o", "pyramidkv", "obcache"})
+        if (nntr_cfg.contains(method))
+          throw std::invalid_argument(
+            "EntroKV: remove other KV method configurations");
+      entrokv_properties_ = {"entrokv_beta=" + json(config.beta).dump(),
+                             "entrokv_alpha=" + json(config.alpha).dump(),
+                             "entrokv_window=" + std::to_string(config.window),
+                             "entrokv_kernel=" + std::to_string(config.kernel)};
+      if (config.calibrated)
+        entrokv_properties_.push_back("entrokv_baseline_entropy=" +
+                                      json(config.baseline_entropy).dump());
+    }
+  }
 }
 
 void CausalLM::allocateAndBindKVCache() {
@@ -947,6 +1009,9 @@ std::string CausalLM::kvCacheModelTag() const {
 }
 
 void CausalLM::save_kvcache(std::string path, int to_) {
+  if (!entrokv_properties_.empty())
+    throw std::invalid_argument(
+      "EntroKV: saving compressed caches is unsupported");
   if (!kv_cache.isAllocated()) {
     throw std::runtime_error(
       "save_kvcache called before allocateAndBindKVCache()");
@@ -974,6 +1039,8 @@ static inline void retire_decode_capture() {
 }
 
 void CausalLM::setSessionTokenPosition(unsigned int pos) {
+  if (!entrokv_properties_.empty() && (pos != 0 || entrokv_run_started_))
+    throw std::invalid_argument("EntroKV: session resume/reset is unsupported");
   USE_KVCACHE = false;
   PRE_COMPUTED_CACHE_PATH.clear();
   SYS_PROMP_LEN = 0;
@@ -983,6 +1050,8 @@ void CausalLM::setSessionTokenPosition(unsigned int pos) {
 
 void CausalLM::setPrecomputedKVCache(const std::string &path,
                                      unsigned int sys_prompt_token_len) {
+  if (!entrokv_properties_.empty())
+    throw std::invalid_argument("EntroKV: precomputed caches are unsupported");
   USE_KVCACHE = !path.empty();
   PRE_COMPUTED_CACHE_PATH = path;
   SYS_PROMP_LEN = USE_KVCACHE ? sys_prompt_token_len : 0;
@@ -991,6 +1060,9 @@ void CausalLM::setPrecomputedKVCache(const std::string &path,
 }
 
 void CausalLM::load_kvcache(std::string path, int to_) {
+  if (!entrokv_properties_.empty())
+    throw std::invalid_argument(
+      "EntroKV: loading compressed caches is unsupported");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1004,6 +1076,8 @@ void CausalLM::load_kvcache(std::string path, int to_) {
 
 unsigned int CausalLM::resumeFromKVCacheFile(const std::string &path,
                                              unsigned int token_len) {
+  if (!entrokv_properties_.empty())
+    throw std::invalid_argument("EntroKV: saved-cache resume is unsupported");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1349,6 +1423,13 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
                              "initialize() before run().");
   }
 
+  if (!entrokv_properties_.empty() &&
+      (entrokv_run_started_ || BATCH_SIZE != 1 || SKIP_PREFILL || USE_KVCACHE ||
+       global_token_len != 0 || SYS_PROMP_LEN != 0 ||
+       causallm_engine() != "cpu"))
+    throw std::invalid_argument(
+      "EntroKV: requires a fresh batch-1 request without resume/skip-prefill");
+
   struct StreamerEndGuard {
     BaseStreamer *streamer;
     ~StreamerEndGuard() { streamer_end(streamer); }
@@ -1519,6 +1600,30 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   _input.clear();
 
   unsigned int init_len = init_input.size();
+  if (!entrokv_properties_.empty()) {
+    if (init_len == 0 || init_len > INIT_SEQ_LEN ||
+        (prefillDriveChunk() > 0 && init_len > prefillDriveChunk()))
+      throw std::invalid_argument(
+        "EntroKV: empty/chunked prefill is unsupported");
+    for (int i = 0; i < NUM_LAYERS; ++i)
+      if (getKVCacheRows(i) != MAX_SEQ_LEN)
+        throw std::invalid_argument(
+          "EntroKV: window/ring caches are unsupported");
+    auto properties = entrokv_properties_;
+    properties.push_back("entrokv_prompt_length=" + std::to_string(init_len));
+    unsigned int configured = 0;
+    model->forEachLayer(
+      [&](ml::train::Layer &layer, nntrainer::RunLayerContext &, void *) {
+        if (layer.getType() == MHACoreLayer::type) {
+          layer.setProperty(properties);
+          ++configured;
+        }
+      },
+      nullptr);
+    if (configured != static_cast<unsigned int>(NUM_LAYERS))
+      throw std::invalid_argument("EntroKV: expected one mha_core per layer");
+    entrokv_run_started_ = true;
+  }
   float *input_sample =
     (float *)malloc(sizeof(float) * BATCH_SIZE * MAX_SEQ_LEN);
   std::vector<bool> eos_list(BATCH_SIZE, false);

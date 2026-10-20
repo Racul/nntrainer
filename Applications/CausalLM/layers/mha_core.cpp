@@ -16,11 +16,13 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <engine.h>
 #include <env_compat.h>
 #include <kv_ring.h> // causallm::kvRingCap (shared with models/transformer.h)
+#include <llm_util.hpp>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -1313,6 +1315,9 @@ void MHACoreLayer::ensure_rope_flat_lut() {
  */
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
+  if (entrokv_.enabled() && (!use_external_cache || training))
+    throw std::invalid_argument(
+      "EntroKV: external-cache inference is required");
   if (!use_external_cache) {
     // 3/4-input (internal KV cache) mode: full-sequence self-attention.
     //
@@ -1373,6 +1378,39 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
   unsigned int step_size = (incremental_step_size > 0)
                              ? incremental_step_size
                              : (unsigned int)query.height();
+  if (entrokv_.enabled()) {
+    const auto cache_dtype = cache_key.getDataType();
+    if (causallm_engine() != "cpu" || query.batch() != 1 ||
+        query.channel() != 1 ||
+        query.getFormat() != ml::train::TensorDim::Format::NCHW ||
+        query.getDataType() != ml::train::TensorDim::DataType::FP32 ||
+        key.getDataType() != ml::train::TensorDim::DataType::FP32 ||
+        value.getDataType() != ml::train::TensorDim::DataType::FP32 ||
+        output.getDataType() != ml::train::TensorDim::DataType::FP32 ||
+        num_heads_Q == 0 || num_heads_KV == 0 ||
+        num_heads_Q % num_heads_KV != 0 ||
+        cache_key.getDim() != cache_value.getDim() || cache_key.batch() != 1 ||
+        cache_key.channel() != 1 ||
+        cache_key.getFormat() != ml::train::TensorDim::Format::NCHW ||
+        cache_key.width() != num_heads_KV * head_dim ||
+        (cache_dtype != ml::train::TensorDim::DataType::FP32 &&
+         cache_dtype != ml::train::TensorDim::DataType::FP16 &&
+         cache_dtype != ml::train::TensorDim::DataType::UINT16) ||
+        use_sink || skip_prefill || !is_causal || kv_ring_cap ||
+        local_window_size < cache_key.height() ||
+        attn_logit_softcapping != 0.0f)
+      throw std::invalid_argument(
+        "EntroKV: requires CPU FP32, batch 1, full causal attention, no "
+        "sink/ring/skip-prefill/logit-softcap, and compatible GQA/KV storage");
+    entrokv_.checkStep(cache_index, step_size, cache_key.height(),
+                       max_position_embeddings);
+    if (!entrokv_.keepsFullCache()) {
+      entrokvForward(query, key, value, output, cache_key, cache_value,
+                     step_size);
+      cache_index += step_size;
+      return;
+    }
+  }
   unsigned int from = cache_index;
   unsigned int to = cache_index + step_size;
 
@@ -1477,6 +1515,14 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
     }
   }
 
+  if (entrokv_.enabled()) {
+    if (cache_index == 0) {
+      entrokv_.finishUncompressed(num_heads_KV);
+      logEntroKVActivation();
+    } else {
+      entrokv_.finishDecode();
+    }
+  }
   cache_index += step_size;
 }
 
@@ -1490,6 +1536,8 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
 void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
                                           unsigned int _from, unsigned int _to,
                                           bool training) {
+  if (entrokv_.enabled() && !use_external_cache)
+    throw std::invalid_argument("EntroKV: internal KV cache is unsupported");
   // External KV cache path: from/to are interpreted as the absolute write
   // position; route through forwarding() which reads cache_key/cache_value
   // from input slots 3/4. forwarding() advances cache_index internally.
@@ -1969,6 +2017,73 @@ static void _kvst_mark_scatter(double t1, double tk, double tv, double t2) {
   }
 }
 #endif
+
+void MHACoreLayer::logEntroKVActivation() const {
+  std::fprintf(stderr, "[EntroKV] active prompt=%u retained_span=%u quotas=",
+               entrokv_.promptLength(), entrokv_.retainedSpan());
+  for (const auto quota : entrokv_.quotas())
+    std::fprintf(stderr, "%u,", quota);
+  std::fprintf(stderr, " allocation=unchanged\n");
+}
+
+void MHACoreLayer::entrokvForward(
+  nntrainer::Tensor &query, nntrainer::Tensor &key, nntrainer::Tensor &value,
+  nntrainer::Tensor &output, nntrainer::Tensor &cache_key,
+  nntrainer::Tensor &cache_value, unsigned int rows) {
+  entrokv_.checkStep(cache_index, rows, cache_key.height(),
+                     max_position_embeddings);
+  const unsigned int physical = entrokv_.physicalPosition(cache_index);
+  auto step = [rows](nntrainer::Tensor &t, size_t offset) {
+    auto dim = t.getDim();
+    dim.height(rows);
+    return t.getSharedDataTensor(dim, offset, true);
+  };
+  auto q = step(query, 0);
+  auto k = step(key, 0);
+  auto v = step(value, 0);
+  auto o = step(output, 0);
+  auto kc = step(cache_key, size_t(physical) * cache_key.width());
+  auto vc = step(cache_value, size_t(physical) * cache_value.width());
+  // Only cache addressing uses physical positions; Q/K rotation stays absolute.
+  apply_rotary_emb_tensor_v2(q, q, head_dim, cache_index, true);
+  apply_rotary_emb_tensor_v2(k, kc, head_dim, cache_index, true);
+  apply_rotary_emb_tensor_v2(v, vc, head_dim, cache_index, false);
+
+  const unsigned int group = num_heads_Q / num_heads_KV;
+  // The same host kernels produce both attention output and observation. Limit
+  // scratch to O(32 * prompt_length * query_heads), rather than a full L^2
+  // plane.
+  for (unsigned int offset = 0; offset < rows;) {
+    const unsigned int block = std::min(32u, rows - offset);
+    const unsigned int from = physical + offset;
+    const unsigned int to = from + block;
+    auto qdim = q.getDim();
+    qdim.height(block);
+    auto odim = o.getDim();
+    odim.height(block);
+    auto qb = q.getSharedDataTensor(qdim, size_t(offset) * q.width(), true);
+    auto ob = o.getSharedDataTensor(odim, size_t(offset) * o.width(), true);
+    nntrainer::Tensor scores(
+      1, 1, EntroKVState::triangle(to) - EntroKVState::triangle(from),
+      num_heads_Q, q.getTensorType());
+    compute_kcaches(qb, cache_key, scores, from, block, num_heads_Q, group,
+                    head_dim);
+    if (cache_index != 0)
+      entrokv_.maskDecode(scores, num_heads_Q);
+    softmax_triangle(scores, block, num_heads_Q, from);
+    if (cache_index == 0)
+      entrokv_.observe(scores, from, block, num_heads_Q, num_heads_KV);
+    compute_fp16vcache_transposed(scores, cache_value, ob, from, num_heads_KV,
+                                  group, head_dim, to);
+    offset += block;
+  }
+  if (cache_index == 0) {
+    entrokv_.finishPrefill(cache_key, cache_value, num_heads_KV, head_dim);
+    logEntroKVActivation();
+  } else {
+    entrokv_.finishDecode();
+  }
+}
 
 void MHACoreLayer::one_batch_incremental_forwarding(
   const unsigned int batch, const unsigned int _from, const unsigned int from,
@@ -6160,16 +6275,40 @@ void MHACoreLayer::exportTo(nntrainer::Exporter &exporter,
 void MHACoreLayer::setProperty(const std::vector<std::string> &values) {
   std::vector<std::string> props;
   props.reserve(values.size());
+  auto entrokv_config = entrokv_.config();
+  unsigned int entrokv_prompt = entrokv_.promptLength();
+  bool entrokv_changed = false;
   for (const auto &value : values) {
     std::string key;
     std::string parsed_value;
-    if (nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE &&
-        key == "cache_index") {
+    const bool parsed =
+      nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE;
+    if (parsed && key.compare(0, 8, "entrokv_") == 0) {
+      if (key == "entrokv_beta")
+        entrokv_config.beta = EntroKVConfig::real(parsed_value);
+      else if (key == "entrokv_alpha")
+        entrokv_config.alpha = EntroKVConfig::real(parsed_value);
+      else if (key == "entrokv_baseline_entropy") {
+        entrokv_config.baseline_entropy = EntroKVConfig::real(parsed_value);
+        entrokv_config.calibrated = true;
+      } else if (key == "entrokv_window")
+        entrokv_config.window = EntroKVConfig::integer(parsed_value);
+      else if (key == "entrokv_kernel")
+        entrokv_config.kernel = EntroKVConfig::integer(parsed_value);
+      else if (key == "entrokv_prompt_length")
+        entrokv_prompt = EntroKVConfig::integer(parsed_value);
+      else
+        throw std::invalid_argument("EntroKV: unknown property " + key);
+      entrokv_changed = true;
+    } else if (parsed && key == "cache_index") {
       setCacheIndex(static_cast<unsigned int>(std::stoul(parsed_value)));
     } else {
       props.push_back(value);
     }
   }
+
+  if (entrokv_changed)
+    entrokv_.configure(entrokv_config, entrokv_prompt);
 
   auto remain_props = loadProperties(props, mha_core_props);
   LayerImpl::setProperty(remain_props);
