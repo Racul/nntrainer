@@ -6,6 +6,10 @@
 /builddir
 /builddir_app
 /builddir_app_machine
+/.venv/
+/models/
+/logs/
+/data/
 .cache/
 .idea/
 
