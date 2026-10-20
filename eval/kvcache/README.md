@@ -1,7 +1,8 @@
 # KV-cache method evaluation
 
-`kvcache_eval.py` compares a baseline CausalLM executable with KV-cache method
-executables (`snapkv`, `h2o`, `pyramidkv`) on every project metric:
+`kvcache_eval.py` compares a baseline CausalLM executable with method
+executables built from any branch (KV-cache eviction or otherwise) on every
+project metric. A new method needs no change to this script:
 
 | Metric | Subcommand | Source |
 |---|---|---|
@@ -14,9 +15,10 @@ executables (`snapkv`, `h2o`, `pyramidkv`) on every project metric:
 | Output quality guardrail | `quality` | LongBench v1 official metrics |
 
 The script does not build anything. Build each condition from its own branch
-with identical Meson options and compiler, then pass the executables. All
-conditions of one run share one model directory, so compare executables built
-on the same base.
+with identical Meson options and compiler, then pass the executables. A run
+refuses differing builds unless `--allow-build-difference` is given, which
+marks the run. All conditions of one run share one model directory, so compare
+executables built on the same base.
 
 Convert the model with the converter of that base. Since `5103c857` the Qwen3
 converter writes FFN weights as gate, up, down, and main no longer remaps the
@@ -26,18 +28,44 @@ cannot detect that, so inspect a few outputs of every new setup.
 
 ## Conditions
 
-Each `--condition` is `NAME=BINARY`. Method settings default to the values
-below and can be overridden with `--config NAME=JSON`. `--revision NAME=REV`
-records the source revision of each executable, which cannot be inferred from
-the checkout.
+The script holds no list of allowed methods. A condition is described by these options:
 
-| Method | `nntr_config.json` key | Default settings | Activation check |
+| Option | Meaning |
+|---|---|
+| `--condition LABEL=BINARY` | Repeatable. The label is free (`[A-Za-z0-9._-]`, up to 64 characters). `baseline` is the reference: it runs the model's own `nntr_config.json`, and every other label is compared with it. |
+| `--setting LABEL=JSON` | The `nntr_config.json` keys this condition adds, e.g. `'capkv-r50={"capkv": {"ratio": 0.5}}'`. Keys the harness controls cannot be set: prompt, lengths, batch, model files, chat fields. |
+| `--expect LABEL=REGEX` | Repeatable, multiline regex. A log line the method prints only while it is active. It must appear in every run of LABEL and must not appear in any baseline run, so it must tell the two apart. |
+| `--unchecked LABEL` | Runs a non-preset condition without `--expect`. The summary marks it **UNCHECKED: activation not proven**. |
+| `--preset LABEL=PRESET` | Applies a preset to a label with another name, e.g. `h2o-b512=h2o`. |
+| `--revision LABEL=REV` | Records the source revision of the executable, which cannot be inferred from the checkout. |
+
+A non-preset condition without `--expect` or `--unchecked` is refused. Without that check, a method that silently stayed off would be reported as "no effect".
+
+How settings are applied:
+- New keys that one condition adds are removed from every other condition, baseline included. A key the model already has, such as `"fsu"`, is changed only for the condition that overrides it.
+- Lines matching a condition's own `--expect` patterns (or preset marker) are excluded from the fatal/truncation/fallback scan. A method may log, e.g., "truncated 4094 tokens".
+
+Built-in presets need no `--setting` or `--expect`. A preset is used when the label is the preset name or is given `--preset`. Its `--setting` merges into the preset key, e.g. `'h2o-b512={"h2o": {"budget": 512}}'` keeps `recent=128`.
+
+| Preset | `nntr_config.json` key | Default settings | Activation check |
 |---|---|---|---|
 | `snapkv` | `snapkv` | budget 256, window 16, kernel 5, maxpool | `[SnapKV cache]` line iff prompt > budget; capacity = budget + decode steps |
 | `h2o` | `h2o` | budget 256, recent 128 | `[H2O] h2o_budget=... h2o_recent=...` |
 | `pyramidkv` | `pyramidkv` | budget 256, window 64, kernel 5, beta 20 | `[PyramidKV]` header and per-layer retention schedule |
 
-A baseline run fails if any method marker appears.
+A baseline run fails if any preset marker or any condition's `--expect` pattern appears in its log. Every summary ends with a table of each condition's additions and activation check.
+
+Several variants of one method can share a run and its single baseline, for example:
+
+```bash
+--condition baseline=build-main/Applications/CausalLM/nntr_causallm \
+--condition capkv-r50=build-capkv/Applications/CausalLM/nntr_causallm \
+--setting 'capkv-r50={"capkv": {"ratio": 0.5}}' --expect 'capkv-r50=^\[CapKV\] ' \
+--condition capkv-r75=build-capkv/Applications/CausalLM/nntr_causallm \
+--setting 'capkv-r75={"capkv": {"ratio": 0.75}}' --expect 'capkv-r75=^\[CapKV\] '
+```
+
+When adding a method on a new branch, print one line on activation, e.g. `std::clog << "[MyKV] budget=…"`, so `--expect` can prove it ran.
 
 ## Latency and memory (`perf`)
 
@@ -135,7 +163,7 @@ An existing `--output` directory is resumed only when the whole protocol is unch
 
 ## Differences from the pyramidkv helper
 
-- Any set of conditions; method settings and activation checks come from one table.
+- Any set of conditions and methods; settings and activation checks come from the command line, with presets for the existing branches.
 - Latency/memory and quality live in one script with shared validation.
 - Warning patterns are searched outside the echoed prompt and prediction.
 - `--reuse-from` and the legacy Windows parser recovery are not carried over. `perf` is Linux only.

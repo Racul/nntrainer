@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Evaluate NNTrainer CausalLM KV-cache methods against an unchanged baseline.
+"""Evaluate NNTrainer CausalLM methods against an unchanged baseline.
 
 Covers the project metrics: end-to-end latency, sampled peak RSS and
 throughput on fixed prompts (perf), and output quality on LongBench v1
 (quality). Each executable is built from its own branch; this script only
-runs, validates and reports them.
+runs, validates and reports them. Methods are not built in: a condition is
+LABEL=BINARY plus the nntr_config.json keys it adds (--setting) and the log
+lines that prove it ran (--expect). SnapKV, H2O and PyramidKV are presets.
 
   prepare  tokenize the official LongBench v1 dataset into a fixed cases file
   quality  generate and score LongBench predictions for every condition
@@ -48,13 +50,20 @@ BUILD_KEYS = (
 )
 DEVICE_KEYS = ("enable-opencl", "enable-npu", "enable-htp", "enable-cuda")
 THREADS = dict(NNTR_NUM_THREADS="4", OMP_NUM_THREADS="4", OPENBLAS_NUM_THREADS="1")
-# Default settings, written under the method's own nntr_config.json key.
-METHODS = {
-    "snapkv": dict(budget=256, window=16, kernel=5, pooling="maxpool"),
-    "h2o": dict(budget=256, recent=128),
-    "pyramidkv": dict(budget=256, window=64, kernel=5, beta=20),
+# Built-in presets: default settings under the nntr_config.json key of the
+# same name, and a pattern the branch logs only while the method runs. Any
+# other method is described on the command line (--setting / --expect).
+PRESETS = {
+    "snapkv": dict(settings=dict(budget=256, window=16, kernel=5, pooling="maxpool"), marker=r"\[SnapKV"),
+    "h2o": dict(settings=dict(budget=256, recent=128), marker=r"\[H2O\]"),
+    "pyramidkv": dict(settings=dict(budget=256, window=64, kernel=5, beta=20), marker=r"\[PyramidKV"),
 }
-MARKERS = {"snapkv": "[SnapKV", "h2o": "[H2O]", "pyramidkv": "[PyramidKV"}
+# nntr_config.json keys the harness sets itself; a --setting may not change them.
+CONTROLLED_KEYS = ("sample_input", "init_seq_len", "max_seq_len", "num_to_generate", "batch_size",
+                   "model_file_name", "tokenizer_file", "embedding_file_name",
+                   "chat_input", "system_prompt", "skip_prefill")
+# Labels name log files and table columns.
+LABEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # The agreed memory metric is the unmodified repository script.
 MEMORY_SCRIPT = REPO / "Applications/utils/mem_usage.sh"
 MEMORY_SCRIPT_SHA = "f075e1f0d535128da1d6c2e7dbc5827bf442ff5d3da01be3ca1232074a9d6b62"
@@ -213,11 +222,8 @@ def pyramidkv_retained(settings, layer, length, layers):
     return high - layer * ((high - low) // (layers - 1)) + settings["window"]
 
 
-def activation_errors(method, settings, text, tokens, decode_steps):
-    """Check from each branch's own log lines that only the requested policy ran."""
-    others = sorted(m for m, marker in MARKERS.items() if m != method and marker in text)
-    if others:
-        return ["unexpected activation marker: " + ", ".join(others)]
+def preset_errors(method, settings, text, tokens, decode_steps):
+    """Detailed checks of what each built-in method's branch logs when active."""
     if method == "snapkv":
         # SnapKV reports its compacted cache only when the prompt exceeds the
         # budget; the capacity reveals the budget actually applied.
@@ -243,7 +249,26 @@ def activation_errors(method, settings, text, tokens, decode_steps):
     return []
 
 
-def parse_metrics(text, returncode, tokens, decode_steps):
+def activation_errors(protocol, label, text, tokens, decode_steps):
+    """Prove from the condition's own log that its method ran, and that the
+    baseline shows none of the patterns any condition expects."""
+    spec = protocol["condition_specs"][label]
+    if label == "baseline":
+        found = [p for p in protocol["baseline_forbidden"] if re.search(p, text, re.M)]
+        return ["baseline log matches method pattern(s): " + ", ".join(found)] if found else []
+    errors = []
+    if spec["preset"]:
+        errors += preset_errors(spec["preset"], spec["setting"][spec["preset"]], text, tokens, decode_steps)
+    errors += [f"missing expected log line /{p}/" for p in spec["expect"] if not re.search(p, text, re.M)]
+    return errors
+
+
+def method_log_patterns(spec):
+    """Log lines a method prints on purpose; never read as warnings."""
+    return spec["expect"] + ([PRESETS[spec["preset"]]["marker"]] if spec["preset"] else [])
+
+
+def parse_metrics(text, returncode, tokens, decode_steps, method_lines=()):
     metrics, errors = {}, []
     if returncode:
         errors.append(f"model exit {returncode}")
@@ -275,8 +300,12 @@ def parse_metrics(text, returncode, tokens, decode_steps):
         errors.append("invalid decode count")
     else:
         metrics["early_eos"] = generated < decode_steps
-    if re.search(r"FATAL ERROR|truncat|heuristic|falling back", text, re.I):
-        errors.append("fatal/truncation/fallback output")
+    # A method's own activation lines may legitimately say "truncated" etc.
+    scanned = "\n".join(line for line in text.splitlines()
+                        if not any(re.search(p, line) for p in method_lines))
+    warning = re.search(r".*(?:FATAL ERROR|truncat|heuristic|falling back).*", scanned, re.I)
+    if warning:
+        errors.append("fatal/truncation/fallback output: " + warning[0].strip()[:160])
     return metrics, errors
 
 
@@ -374,21 +403,78 @@ def environment():
     return info
 
 
+def condition_specs(args, base_config):
+    """Describe every condition without built-in knowledge of its method.
+
+    A condition is LABEL=BINARY. A label naming a preset (or given --preset)
+    gets that method's defaults and log checks. Any other method adds its
+    nntr_config.json keys with --setting and proves it ran with --expect
+    patterns; --unchecked accepts a run with no such proof, and says so.
+    """
+    binaries = {}
+    for value in args.condition:
+        label, sep, path = value.partition("=")
+        if not sep or not path or label in binaries:
+            raise ValueError(f"Expected unique LABEL=BINARY for --condition: {value}")
+        if not LABEL_PATTERN.fullmatch(label):
+            raise ValueError(f"Condition label must match {LABEL_PATTERN.pattern}: {label}")
+        binaries[label] = Path(path).resolve()
+    labels = (["baseline"] if "baseline" in binaries else []) + [label for label in binaries if label != "baseline"]
+    presets = parse_pairs(args.preset, "--preset")
+    settings = {label: json.loads(value) for label, value in parse_pairs(args.setting, "--setting").items()}
+    expects = {}
+    for value in args.expect:
+        label, sep, pattern = value.partition("=")
+        if not sep or not pattern:
+            raise ValueError(f"Expected LABEL=REGEX for --expect: {value}")
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            raise ValueError(f"Invalid --expect pattern for {label}: {error}") from error
+        expects.setdefault(label, []).append(pattern)
+    named = set(presets) | set(settings) | set(expects) | set(args.unchecked)
+    if named - set(binaries):
+        raise ValueError("Options name labels without a --condition: " + ", ".join(sorted(named - set(binaries))))
+    if "baseline" in named:
+        raise ValueError("baseline runs the model's own configuration; give it no preset, setting or expectation")
+    specs = {"baseline": dict(preset=None, setting={}, expect=[], activation="baseline")} if "baseline" in binaries else {}
+    for label in labels[1:] if "baseline" in binaries else labels:
+        preset = presets.get(label, label if label in PRESETS else None)
+        if preset is not None and preset not in PRESETS:
+            raise ValueError(f"Unknown preset {preset}; built-in presets: {', '.join(PRESETS)}")
+        setting = settings.get(label, {})
+        if not isinstance(setting, dict):
+            raise ValueError(f"--setting {label} must be a JSON object of nntr_config.json keys")
+        blocked = sorted(set(setting) & set(CONTROLLED_KEYS))
+        if blocked:
+            raise ValueError(f"--setting {label} cannot change harness-controlled keys: {', '.join(blocked)}")
+        setting = dict(setting)
+        if preset:
+            override = setting.get(preset, {})
+            if not isinstance(override, dict):
+                raise ValueError(f"--setting {label}: {preset} must be a JSON object")
+            setting[preset] = dict(PRESETS[preset]["settings"], **override)
+        patterns = expects.get(label, [])
+        if not preset and not patterns and label not in args.unchecked:
+            raise ValueError(f"{label}: add --expect {label}=REGEX for a log line the method prints only when "
+                             f"active, or --unchecked {label} to run without that proof")
+        activation = "+".join(kind for kind, used in (("preset", preset), ("expect", patterns)) if used) or "unchecked"
+        specs[label] = dict(preset=preset, setting=setting, expect=patterns, activation=activation)
+    # Keys a method adds are removed from every other condition, baseline
+    # included; overrides of keys the model already has stay per condition.
+    method_keys = sorted(set(PRESETS) | {key for spec in specs.values() for key in spec["setting"]
+                                         if key not in base_config})
+    forbidden = sorted({preset["marker"] for preset in PRESETS.values()}
+                       | {pattern for spec in specs.values() for pattern in spec["expect"]})
+    return binaries, labels, specs, method_keys, forbidden
+
+
 def prepare_conditions(args):
     """Shared setup: executables, method settings, model assets, builds, runtime."""
-    binaries = {name: Path(path).resolve() for name, path in parse_pairs(args.condition, "--condition").items()}
-    unknown = set(binaries) - {"baseline"} - set(METHODS)
-    if unknown:
-        raise ValueError("Unknown condition(s): " + ", ".join(sorted(unknown)))
-    overrides = {name: json.loads(value) for name, value in parse_pairs(args.config, "--config").items()}
-    if set(overrides) - (set(binaries) - {"baseline"}):
-        raise ValueError("--config names a method that is not a condition")
-    settings = {name: dict(METHODS[name], **overrides.get(name, {})) for name in binaries if name != "baseline"}
-    labels = sorted(binaries, key=lambda name: (name != "baseline", name))
-
     configs = {name: json.loads((args.model / name).read_text(encoding="utf-8-sig"))
                for name in ("config.json", "generation_config.json", "nntr_config.json")}
     nntr = configs["nntr_config.json"]
+    binaries, labels, specs, method_keys, forbidden = condition_specs(args, nntr)
     if any(key in nntr for key in ("chat_input", "system_prompt")) or nntr.get("skip_prefill"):
         raise ValueError("Use plain sample_input with a fresh, full prefill")
     assets = {}
@@ -399,11 +485,13 @@ def prepare_conditions(args):
             assets[key] = sha(Path(nntr[key]))
 
     builds = {name: load_build(binary) for name, binary in binaries.items()}
-    if len({json.dumps(build, sort_keys=True) for build in builds.values()}) != 1:
-        raise ValueError("Build options or compiler differ between conditions: " + json.dumps(builds))
-    build = next(iter(builds.values()))
-    if not build["options"]["enable-transformer"] or any(build["options"][key] for key in DEVICE_KEYS):
-        raise ValueError("Build every condition for CPU with enable-transformer=true")
+    build_difference = len({json.dumps(build, sort_keys=True) for build in builds.values()}) != 1
+    if build_difference and not args.allow_build_difference:
+        raise ValueError("Build options or compiler differ between conditions (--allow-build-difference compares "
+                         "them anyway and marks the run): " + json.dumps(builds))
+    for name, build in builds.items():
+        if not build["options"]["enable-transformer"] or any(build["options"][key] for key in DEVICE_KEYS):
+            raise ValueError(f"Build {name} for CPU with enable-transformer=true")
 
     envs = {}
     for name, binary in binaries.items():
@@ -419,14 +507,14 @@ def prepare_conditions(args):
                 raise RuntimeError("Missing runtime libraries: " + loaded)
             libraries[name] = {p: sha(Path(p)) for p in re.findall(r"=> (\S+)", loaded) if Path(p).is_file()}
     protocol = dict(
-        conditions=labels, methods=settings,
+        conditions=labels, condition_specs=specs, method_keys=method_keys, baseline_forbidden=forbidden,
         declared_revisions=parse_pairs(args.revision, "--revision"),
         batch_size=1, threads=THREADS, engine="cpu",
         cpu_affinity="not pinned" if WINDOWS else args.cpus,
         model_configs=configs, asset_sha256=assets,
         binaries={name: str(path) for name, path in binaries.items()},
         binary_sha256={name: sha(path) for name, path in binaries.items()},
-        runtime_library_sha256=libraries, build_options=build["options"], compiler=build["compiler"],
+        runtime_library_sha256=libraries, builds=builds, build_difference=build_difference,
         environment=environment(), script_sha256=sha(Path(__file__)))
     return protocol, envs
 
@@ -454,11 +542,31 @@ def open_run(out, protocol, records_name):
 def model_config(protocol, label, **fields):
     """Write-ready nntr_config.json for one condition; other methods stay off."""
     config = dict(protocol["model_configs"]["nntr_config.json"], batch_size=1, **fields)
-    for field in list(METHODS) + ["chat_input", "system_prompt"]:
-        config.pop(field, None)
-    if label != "baseline":
-        config[label] = protocol["methods"][label]
+    for key in protocol["method_keys"] + ["chat_input", "system_prompt"]:
+        config.pop(key, None)
+    config.update(protocol["condition_specs"][label]["setting"])
     return config
+
+
+def condition_lines(protocol):
+    """Summary table of what each condition ran and how activation was proven."""
+    specs = protocol.get("condition_specs")
+    if not specs:
+        return []
+    lines = ["", "|Condition|Preset|nntr_config.json additions|Activation check|", "|---|---|---|---|"]
+    for label in protocol["conditions"]:
+        spec = specs[label]
+        check = ("no method pattern may appear" if spec["activation"] == "baseline" else
+                 "**UNCHECKED: activation not proven**" if spec["activation"] == "unchecked" else
+                 " + ".join((["preset log checks"] if spec["preset"] else [])
+                            + [f"`/{p}/`" for p in spec["expect"]]))
+        setting = json.dumps(spec["setting"], ensure_ascii=False, separators=(",", ":")) if spec["setting"] else ""
+        cells = [label, spec["preset"] or "", f"`{setting}`" if setting else "", check]
+        lines.append("|" + "|".join(cell.replace("|", "\\|") for cell in cells) + "|")
+    if protocol.get("build_difference"):
+        lines += ["", "**Warning:** build options or compilers differ between conditions "
+                      "(--allow-build-difference); see `builds` in manifest.json."]
+    return lines
 
 
 def log_paths(out, folder, stem):
@@ -528,7 +636,7 @@ def write_quality_summary(out, manifest, records):
     lines += ["", "Scores use each task's official metric on a 0-100 scale; the mean weights tasks equally.",
               "Greedy decoding, one prediction per case and condition. Per-case latency is recorded in",
               "records.jsonl but varies with early EOS; use `perf` for speed and memory claims.",
-              f"Invalid predictions: {len(invalid)}."]
+              f"Invalid predictions: {len(invalid)}."] + condition_lines(protocol)
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     write_json(out / "scores.json", {task: {label: dict(zip(("score", "n"), task_scores(records, task, label)))
                                             for label in labels} for task in counts})
@@ -628,11 +736,11 @@ def evaluate_quality(args):
                         log_text = stdout
                         errors.append(str(error))
                     log_text += "\n" + stderr
-                    metrics, metric_errors = parse_metrics(log_text, code, case["tokens"], decode_steps)
+                    metrics, metric_errors = parse_metrics(
+                        log_text, code, case["tokens"], decode_steps,
+                        method_log_patterns(protocol["condition_specs"][label]))
                     errors += metric_errors
-                    errors += activation_errors(label if label != "baseline" else None,
-                                                protocol["methods"].get(label), log_text,
-                                                case["tokens"], decode_steps)
+                    errors += activation_errors(protocol, label, log_text, case["tokens"], decode_steps)
                     record = {k: v for k, v in case.items() if k != "prompt"}
                     record.update(condition=label, pred=pred, valid=not errors, failure="; ".join(errors),
                                   quality_score=None if errors else score_prediction(scorer, case, pred),
@@ -725,7 +833,7 @@ def write_perf_summary(out, manifest, records):
               "samples below 30 s). OS peak RSS is CausalLM's ru_maxrss line, a reference only.",
               "Equal-work comparisons need equal decode counts; inspect early EOS and trials.csv.",
               "Temperature and CPU frequency are not controlled or recorded on WSL (N/A).",
-              f"Invalid trials: {sum(not r['valid'] for r in records)}."]
+              f"Invalid trials: {sum(not r['valid'] for r in records)}."] + condition_lines(protocol)
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     with (out / "trials.csv.tmp").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=PERF_COLUMNS, extrasaction="ignore")
@@ -828,10 +936,10 @@ def evaluate_perf(args):
                     log_text = stdout
                     errors.append(str(error))
                 log_text += "\n" + stderr
-                metrics, metric_errors = parse_metrics(log_text, code, tokens, args.n_gen)
+                metrics, metric_errors = parse_metrics(log_text, code, tokens, args.n_gen,
+                                                       method_log_patterns(protocol["condition_specs"][label]))
                 errors += metric_errors
-                errors += activation_errors(label if label != "baseline" else None,
-                                            protocol["methods"].get(label), log_text, tokens, args.n_gen)
+                errors += activation_errors(protocol, label, log_text, tokens, args.n_gen)
                 if phase == "memory":
                     memory, memory_errors = parse_memory(stdout, stderr)
                     metrics.update(memory)
@@ -883,11 +991,22 @@ def main():
                            help="official LongBench v1 directory containing eval.py, metrics.py and config/")
     longbench.add_argument("--cases", type=Path, required=True, help="prepared cases JSONL")
     conditions = argparse.ArgumentParser(add_help=False)
-    conditions.add_argument("--condition", action="append", required=True, metavar="NAME=BINARY",
-                            help="repeatable; NAME is baseline, " + ", ".join(METHODS))
-    conditions.add_argument("--config", action="append", default=[], metavar="NAME=JSON",
-                            help="override method settings, e.g. snapkv='{\"budget\": 512}'")
-    conditions.add_argument("--revision", action="append", default=[], metavar="NAME=REV",
+    conditions.add_argument("--condition", action="append", required=True, metavar="LABEL=BINARY",
+                            help="repeatable; LABEL is free ([A-Za-z0-9._-]), 'baseline' is the reference, "
+                                 "and a preset name (" + ", ".join(PRESETS) + ") applies that preset")
+    conditions.add_argument("--setting", action="append", default=[], metavar="LABEL=JSON",
+                            help="nntr_config.json keys this condition adds, e.g. capkv-r50='{\"capkv\": "
+                                 "{\"ratio\": 0.5}}'; for a preset, its key merges with the preset defaults")
+    conditions.add_argument("--expect", action="append", default=[], metavar="LABEL=REGEX",
+                            help="repeatable; a log line the method prints only when active (multiline regex); "
+                                 "must appear for LABEL and must not appear for baseline")
+    conditions.add_argument("--preset", action="append", default=[], metavar="LABEL=PRESET",
+                            help="apply a preset's defaults and log checks to a differently named label")
+    conditions.add_argument("--unchecked", action="append", default=[], metavar="LABEL",
+                            help="run a custom condition without --expect; marked UNCHECKED in the summary")
+    conditions.add_argument("--allow-build-difference", action="store_true",
+                            help="compare executables whose Meson options or compiler differ; the run is marked")
+    conditions.add_argument("--revision", action="append", default=[], metavar="LABEL=REV",
                             help="record the source revision each executable was built from")
     conditions.add_argument("--cpus", default="0,2,4,6", help="Linux taskset affinity")
     conditions.add_argument("--output", type=Path, help="run directory; an existing one is resumed")
