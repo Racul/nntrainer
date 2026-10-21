@@ -204,6 +204,21 @@ def load_scorer(official):
     return module
 
 
+def special_tokens(tokenizer_file):
+    """Strings of the tokenizer's special tokens, e.g. <|im_end|>."""
+    added = json.loads(Path(tokenizer_file).read_text(encoding="utf-8")).get("added_tokens", [])
+    return sorted({token["content"] for token in added if token.get("special")}, key=len, reverse=True)
+
+
+def clean_prediction(pred, specials):
+    """NNTrainer prints the EOS token text; the official prediction script
+    decodes with skip_special_tokens=True, so drop special tokens before
+    scoring (e.g. "unanswerable<|im_end|>" would otherwise score 0)."""
+    for token in specials:
+        pred = pred.replace(token, "")
+    return pred
+
+
 def score_prediction(scorer, case, pred):
     scored = pred.lstrip("\n").split("\n")[0] if case["task"] in FIRST_LINE else pred
     return max(scorer.dataset2metric[case["task"]](scored, answer, all_classes=case["all_classes"])
@@ -676,7 +691,9 @@ def evaluate_quality(args):
         first_token="init_seq_len=prompt_tokens+1 registers the prefill output; num_to_generate=max_new_tokens-1",
         samsum_eos="newline added to EOS, as in the official prediction script",
         scorer_sha256={name: sha(args.official / name) for name in ("eval.py", "metrics.py")},
-        fuzzywuzzy_backend=fuzz_backend)
+        fuzzywuzzy_backend=fuzz_backend,
+        prediction_cleanup="special tokens removed before scoring, as skip_special_tokens=True",
+        special_tokens=special_tokens(protocol["model_configs"]["nntr_config.json"]["tokenizer_file"]))
     scorer = load_scorer(args.official)
     labels = protocol["conditions"]
     if args.check:
@@ -742,8 +759,10 @@ def evaluate_quality(args):
                     errors += metric_errors
                     errors += activation_errors(protocol, label, log_text, case["tokens"], decode_steps)
                     record = {k: v for k, v in case.items() if k != "prompt"}
-                    record.update(condition=label, pred=pred, valid=not errors, failure="; ".join(errors),
-                                  quality_score=None if errors else score_prediction(scorer, case, pred),
+                    scored = clean_prediction(pred, protocol["special_tokens"])
+                    record.update(condition=label, pred=scored, raw_pred=pred, valid=not errors,
+                                  failure="; ".join(errors),
+                                  quality_score=None if errors else score_prediction(scorer, case, scored),
                                   pid=pid, duration_s=round(duration, 3), started_at=started_at,
                                   stdout_log=str(stdout_path.relative_to(out)),
                                   stderr_log=str(stderr_path.relative_to(out)), **metrics)

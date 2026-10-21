@@ -107,6 +107,7 @@ Positive is an improvement in both. Raw values are in `trials.jsonl` and `trials
 - greedy decoding, one prediction per case and condition;
 - `init_seq_len = prompt_tokens + 1` and `num_to_generate = max_new_tokens − 1`, because NNTrainer emits the first new token from prefill;
 - SAMSum adds newline to EOS.
+- Special tokens (e.g. the `<|im_end|>` text NNTrainer prints on EOS) are removed before scoring. The official prediction script decodes with `skip_special_tokens=True`; without this, an answer such as `unanswerable<|im_end|>` normalizes to `unanswerableimend` and scores 0. `records.jsonl` keeps the raw text in `raw_pred`. Scores from the pyramidkv branch's helper did not remove them and are not directly comparable.
 
 Prompts are limited to **2,048 tokens by default**, matching the longest performance input; `max_seq_len = max_input + 513`.
 
