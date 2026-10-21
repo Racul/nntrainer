@@ -28,9 +28,12 @@
 #include <engine.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <sstream>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -399,6 +402,54 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
     SAMPLING_SEED = causallm::kDefaultSamplingSeed;
   rng.seed(SAMPLING_SEED);
   global_token_len = 0;
+
+  // Optional CapKV prompt eviction; omitting "capkv" keeps the existing path.
+  capkv_properties_.clear();
+  if (nntr_cfg.contains("capkv")) {
+    const auto &settings = nntr_cfg.at("capkv");
+    if (!settings.is_object())
+      throw std::invalid_argument("capkv must be a JSON object");
+    CapKVConfig config;
+    for (const auto &item : settings.items()) {
+      const auto &name = item.key();
+      const auto text = item.value().is_string()
+                          ? item.value().get<std::string>()
+                          : item.value().dump();
+      if (name == "budget")
+        config.budget = CapKVConfig::parseUnsigned(text);
+      else if (name == "ratio")
+        config.ratio = CapKVConfig::parseNumber(text);
+      else if (name == "tau")
+        config.tau = CapKVConfig::parseNumber(text);
+      else if (name == "sink")
+        config.sink = CapKVConfig::parseUnsigned(text);
+      else if (name == "future")
+        config.future = CapKVConfig::parseUnsigned(text);
+      else if (name == "record_capacity")
+        config.record_capacity = CapKVConfig::parseBool(text);
+      else
+        throw std::invalid_argument("Unknown capkv setting: " + name);
+    }
+    config.validate();
+    if (config.enabled()) {
+      if (cfg.value("model_type", std::string()) != "qwen3" ||
+          nntr_cfg.value("model_tensor_type", std::string()) != "FP32-FP32")
+        throw std::invalid_argument(
+          "CapKV currently supports Qwen3 FP32-FP32 only");
+      const auto number = [](double value) {
+        std::ostringstream text;
+        text << std::setprecision(15) << value;
+        return text.str();
+      };
+      capkv_properties_ = {"capkv_budget=" + std::to_string(config.budget),
+                           "capkv_ratio=" + number(config.ratio),
+                           "capkv_tau=" + number(config.tau),
+                           "capkv_sink=" + std::to_string(config.sink),
+                           "capkv_future=" + std::to_string(config.future),
+                           std::string("capkv_record_capacity=") +
+                             (config.record_capacity ? "true" : "false")};
+    }
+  }
 }
 
 void CausalLM::allocateAndBindKVCache() {
@@ -947,6 +998,8 @@ std::string CausalLM::kvCacheModelTag() const {
 }
 
 void CausalLM::save_kvcache(std::string path, int to_) {
+  if (!capkv_properties_.empty())
+    throw std::invalid_argument("CapKV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     throw std::runtime_error(
       "save_kvcache called before allocateAndBindKVCache()");
@@ -991,6 +1044,8 @@ void CausalLM::setPrecomputedKVCache(const std::string &path,
 }
 
 void CausalLM::load_kvcache(std::string path, int to_) {
+  if (!capkv_properties_.empty())
+    throw std::invalid_argument("CapKV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1004,6 +1059,8 @@ void CausalLM::load_kvcache(std::string path, int to_) {
 
 unsigned int CausalLM::resumeFromKVCacheFile(const std::string &path,
                                              unsigned int token_len) {
+  if (!capkv_properties_.empty())
+    throw std::invalid_argument("CapKV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1349,6 +1406,14 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
                              "initialize() before run().");
   }
 
+  if (!capkv_properties_.empty() &&
+      (BATCH_SIZE != 1 || SKIP_PREFILL || USE_KVCACHE ||
+       global_token_len != 0 || causallm_engine() != "cpu" ||
+       prefillDriveChunk() != 0))
+    throw std::invalid_argument(
+      "CapKV requires a fresh batch-one CPU run without skipped, cached or "
+      "chunked prefill");
+
   struct StreamerEndGuard {
     BaseStreamer *streamer;
     ~StreamerEndGuard() { streamer_end(streamer); }
@@ -1519,6 +1584,41 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   _input.clear();
 
   unsigned int init_len = init_input.size();
+  if (!capkv_properties_.empty()) {
+    if (!init_len || static_cast<uint64_t>(init_len) + reserved_for_generation >
+                       std::min<uint64_t>(MAX_SEQ_LEN, MAX_POSITION_EMBEDDINGS))
+      throw std::invalid_argument(
+        "CapKV prompt/generation exceeds sequence limits");
+    // Each attention layer evicts its own prompt cache once after prefill.
+    std::vector<bool> seen(static_cast<size_t>(NUM_LAYERS), false);
+    unsigned int layers = 0;
+    std::function<void(ml::train::Layer &, nntrainer::RunLayerContext &,
+                       void *)>
+      configure =
+        [&](ml::train::Layer &layer, nntrainer::RunLayerContext &, void *) {
+          if (layer.getType() != causallm::MHACoreLayer::type)
+            return;
+          const auto &name = layer.getName();
+          const auto index =
+            CapKVConfig::parseUnsigned(name.substr(5, name.find('_') - 5));
+          if (index >= seen.size() || seen[index] ||
+              name != "layer" + std::to_string(index) + "_attention")
+            throw std::invalid_argument("Invalid CapKV Qwen3 layer name");
+          auto settings = capkv_properties_;
+          settings.push_back("capkv_layer=" + std::to_string(index));
+          settings.push_back("capkv_prompt_length=" + std::to_string(init_len));
+          layer.setProperty(settings);
+          seen[index] = true;
+          ++layers;
+        };
+    model->forEachLayer(configure, nullptr);
+    if (layers != static_cast<unsigned int>(NUM_LAYERS))
+      throw std::invalid_argument("CapKV requires an MHA cache in every layer");
+    std::clog << "[CapKV]";
+    for (const auto &property : capkv_properties_)
+      std::clog << " " << property;
+    std::clog << " prompt=" << init_len << std::endl;
+  }
   float *input_sample =
     (float *)malloc(sizeof(float) * BATCH_SIZE * MAX_SEQ_LEN);
   std::vector<bool> eos_list(BATCH_SIZE, false);

@@ -431,6 +431,7 @@ protected:
    */
   unsigned int REPETITION_WINDOW;
   unsigned int global_token_len;
+  std::vector<std::string> capkv_properties_; /**< Empty when disabled. */
 
   causallm::SamplingRng rng{causallm::kDefaultSamplingSeed}; /**< sampler RNG */
   bool sampling_seed_pending_ = false; /**< setSamplingSeed() for next run */

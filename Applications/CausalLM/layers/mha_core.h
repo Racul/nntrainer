@@ -35,6 +35,7 @@
 #include <complex>
 
 #include <acti_func.h>
+#include <capkv.h>
 #include <common_properties.h>
 #include <cpu_backend.h>
 #include <layer_impl.h>
@@ -521,6 +522,7 @@ private:
 
   float epsilon;            /** to avoid overflow */
   unsigned int cache_index; /** idx of kv cache */
+  CapKVState capkv_; /** Optional prompt KV eviction, local to this layer. */
 
   /**
    * @brief Honor the LayerImpl `skip_prefill` property. Gemma4 KV-shared
@@ -575,9 +577,12 @@ private:
   unsigned int kv_ring_cap = 0;
   /** Map an absolute cache position to its physical ring row (identity when the
    * ring is off). Used ONLY for cache-storage row offsets: RoPE and the
-   * causal/window masks keep the absolute position. */
+   * causal/window masks keep the absolute position. After CapKV compacts the
+   * prompt (never together with a ring), rows shift down by the evicted
+   * count. */
   inline size_t cacheRow(size_t abs_pos) const {
-    return kv_ring_cap ? (abs_pos % (size_t)kv_ring_cap) : abs_pos;
+    return kv_ring_cap ? (abs_pos % (size_t)kv_ring_cap)
+                       : abs_pos - capkv_.removed();
   }
   bool use_sink = false;
   float attn_logit_softcapping = 0.0f;

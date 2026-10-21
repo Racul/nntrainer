@@ -1313,6 +1313,21 @@ void MHACoreLayer::ensure_rope_flat_lut() {
  */
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
+  if (capkv_.enabled() &&
+      (training || !use_external_cache || !is_causal || use_sink ||
+       skip_prefill || local_window_size != UINT_MAX || kv_ring_cap ||
+       kv_int8 || is_kv_ohwi_enabled() || nntr_engine_env() != "cpu" ||
+       theta <= 0.0f || rope_scaling_type != "default" ||
+       rope_partial_rotary_factor != 1.0f ||
+       context.getInput(INOUT_INDEX::QUERY).batch() != 1 ||
+       context.getInput(INOUT_INDEX::QUERY).getDataType() !=
+         nntrainer::Tdatatype::FP32 ||
+       attn_logit_softcapping != 0.0f))
+    throw std::invalid_argument(
+      "CapKV requires batch-one causal CPU inference with an external cache, "
+      "FP32 queries and default full RoPE, without sinks, sliding windows, "
+      "rings, int8 or OHWI KV, softcapping or skipped prefill");
+
   if (!use_external_cache) {
     // 3/4-input (internal KV cache) mode: full-sequence self-attention.
     //
@@ -1375,6 +1390,8 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                              : (unsigned int)query.height();
   unsigned int from = cache_index;
   unsigned int to = cache_index + step_size;
+  capkv_.checkStep(from, step_size, cache_key.height(),
+                   max_position_embeddings);
 
   auto get_step_dim = [step_size](const ml::train::TensorDim &dim) {
     auto step_dim = dim;
@@ -1407,6 +1424,11 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
       value_step_dim, batch * value_dim.getFeatureLen(), true);
     nntrainer::Tensor output_step = output.getSharedDataTensor(
       output_step_dim, batch * output_dim.getFeatureLen(), true);
+
+    // CapKV averages the pre-RoPE prompt queries; attention rotates them.
+    if (capkv_.enabled() && from == 0)
+      capkv_.observeQueries(query_step, static_cast<unsigned int>(num_heads_Q),
+                            static_cast<unsigned int>(head_dim));
 
     if (query_step.getDataType() == ml::train::TensorDim::DataType::FP32) {
 #if defined(ENABLE_OPENCL) && defined(ENABLE_FP16)
@@ -1475,8 +1497,15 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
         cache_key, cache_value, cache_key_dim, cache_key_step_dim,
         cache_value_dim, cache_value_step_dim);
     }
+    // The prompt attention output is complete; evict once from the cache.
+    if (capkv_.enabled() && from == 0)
+      capkv_.finishPrefill(cache_key, cache_value,
+                           static_cast<unsigned int>(num_heads_Q),
+                           static_cast<unsigned int>(num_heads_KV),
+                           static_cast<unsigned int>(head_dim), theta);
   }
 
+  capkv_.advance(from, step_size);
   cache_index += step_size;
 }
 
@@ -1490,6 +1519,8 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
 void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
                                           unsigned int _from, unsigned int _to,
                                           bool training) {
+  if (capkv_.enabled() && (!use_external_cache || _to <= _from))
+    throw std::invalid_argument("CapKV requires external KV cache steps");
   // External KV cache path: from/to are interpreted as the absolute write
   // position; route through forwarding() which reads cache_key/cache_value
   // from input slots 3/4. forwarding() advances cache_index internally.
@@ -3200,7 +3231,8 @@ void MHACoreLayer::one_batch_incremental_forwarding(
 
   /// @todo replace step_size into input height
   unsigned int step_size = to - from;
-  unsigned int cache_from = cache_index;
+  // Physical rows: identical to cache_index unless CapKV compacted the prompt.
+  unsigned int cache_from = static_cast<unsigned int>(cacheRow(cache_index));
   unsigned int cache_to = cache_from + step_size;
 
   // NNTR_KVHASH: hash this layer's SVM K/V cache so two runs of
@@ -6163,9 +6195,12 @@ void MHACoreLayer::setProperty(const std::vector<std::string> &values) {
   for (const auto &value : values) {
     std::string key;
     std::string parsed_value;
-    if (nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE &&
-        key == "cache_index") {
+    const bool parsed =
+      nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE;
+    if (parsed && key == "cache_index") {
       setCacheIndex(static_cast<unsigned int>(std::stoul(parsed_value)));
+    } else if (parsed && capkv_.consumeProperty(key, parsed_value)) {
+      continue;
     } else {
       props.push_back(value);
     }
