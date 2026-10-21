@@ -416,6 +416,8 @@ protected:
   bool SAVE_KVCACHE;
   bool USE_KVCACHE;
   bool SKIP_PREFILL;
+  std::vector<std::string> entrokv_properties_; /**< Empty: disabled. */
+  bool entrokv_run_started_ = false; /**< One fresh request per model. */
   /**
    * @brief nntr_config.json "repetition_penalty". Divides positive logits of
    *        already-generated tokens (multiplies negative ones), so > 1

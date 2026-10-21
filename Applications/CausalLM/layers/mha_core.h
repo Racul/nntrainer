@@ -37,6 +37,7 @@
 #include <acti_func.h>
 #include <common_properties.h>
 #include <cpu_backend.h>
+#include <entrokv.h>
 #include <layer_impl.h>
 #include <limits.h>
 #include <util_simd.h>
@@ -501,6 +502,17 @@ public:
   inline static const std::string type = "mha_core";
 
 private:
+  EntroKVState entrokv_; /**< Empty/disabled unless explicitly configured. */
+
+  /** @brief Emit actual per-head retention after a completed prefill. */
+  void logEntroKVActivation() const;
+
+  /** @brief CPU FP32 attention with bounded score blocks and head quotas. */
+  void entrokvForward(nntrainer::Tensor &query, nntrainer::Tensor &key,
+                      nntrainer::Tensor &value, nntrainer::Tensor &output,
+                      nntrainer::Tensor &cache_key,
+                      nntrainer::Tensor &cache_value, unsigned int rows);
+
   std::tuple<
     nntrainer::props::NumHeads, props::NumHeads_KV,
     nntrainer::props::ProjectedKeyDim, nntrainer::props::ProjectedValueDim,

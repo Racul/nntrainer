@@ -16,6 +16,7 @@
 
 #include <layer.h>
 #include <layer_context.h>
+#include <mha_core.h>
 #include <qwen3_causallm.h>
 #include <qwen3_embedding.h>
 
@@ -440,6 +441,150 @@ INSTANTIATE_TEST_SUITE_P(
   [](const ::testing::TestParamInfo<causallm_test::TinyCausalLMCase> &info) {
     return info.param.name;
   });
+
+namespace {
+/** @brief Exercise Q/K/V projections with reproducible nonzero tiny weights. */
+void setupEntroKVWeights(TinyQwen3CausalLM &model) {
+  model.forEachLayer(
+    [](ml::train::Layer &layer, nntrainer::RunLayerContext &context, void *) {
+      for (unsigned int w = 0; w < context.getNumWeights(); ++w) {
+        auto &weight = context.getWeight(w);
+        if (weight.getDataType() != ml::train::TensorDim::DataType::FP32)
+          continue;
+        for (size_t i = 0; i < weight.size(); ++i)
+          weight.getData<float>()[i] =
+            causallm_test::isRmsNormLayerType(layer.getType())
+              ? 1.0f
+              : static_cast<float>(static_cast<int>((i * 7 + w) % 23) - 11) *
+                  0.013f;
+      }
+    });
+}
+
+/** @brief The raw-ID adapter bypasses run(); configure MHA explicitly here. */
+void configureTinyEntroKV(TinyQwen3CausalLM &model, bool full_budget = true) {
+  model.forEachLayer([full_budget](ml::train::Layer &layer,
+                                   nntrainer::RunLayerContext &, void *) {
+    if (layer.getType() == causallm::MHACoreLayer::type)
+      layer.setProperty({full_budget ? "entrokv_beta=1" : "entrokv_beta=0.5",
+                         full_budget ? "entrokv_alpha=0" : "entrokv_alpha=1",
+                         "entrokv_baseline_entropy=1", "entrokv_window=1",
+                         "entrokv_kernel=1", "entrokv_prompt_length=4"});
+  });
+}
+} // namespace
+
+TEST(Qwen3EntroKV,
+     full_budget_matches_prefill_logits_and_multiple_decode_steps) {
+  const auto files =
+    causallm_test::makeTinyCausalLMFiles("Qwen3EntroKV", "full_budget", "FP32");
+  // Separate model instances for prefill-only and generation: no cache rewind.
+  for (bool generate : {false, true}) {
+    auto cfg = causallm_test::makeTinyCausalLMConfig(
+      makeQwen3Case(causallm_test::makeTinyFp32DataType()),
+      files.tokenizer_path);
+    TinyQwen3CausalLM baseline(cfg.model, cfg.generation, cfg.nntrainer);
+    TinyQwen3CausalLM method(cfg.model, cfg.generation, cfg.nntrainer);
+    baseline.initializeModel();
+    method.initializeModel();
+    setupEntroKVWeights(baseline);
+    setupEntroKVWeights(method);
+    configureTinyEntroKV(method);
+    const std::vector<unsigned int> prompt{1, 2, 4, 5};
+    if (generate) {
+      const auto expected = baseline.greedyGenerateFromIds(prompt, 3);
+      EXPECT_EQ(method.greedyGenerateFromIds(prompt, 3), expected);
+    } else {
+      const auto expected = baseline.prefillLogitsFromIds(prompt);
+      const auto actual = method.prefillLogitsFromIds(prompt);
+      ASSERT_EQ(actual.size(), expected.size());
+      for (size_t i = 0; i < actual.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(actual[i]));
+        EXPECT_NEAR(actual[i], expected[i], 1e-3f);
+      }
+      // Compression runs after prefill outputs have consumed the original V.
+      TinyQwen3CausalLM compressed(cfg.model, cfg.generation, cfg.nntrainer);
+      compressed.initializeModel();
+      setupEntroKVWeights(compressed);
+      configureTinyEntroKV(compressed, false);
+      const auto before_decode = compressed.prefillLogitsFromIds(prompt);
+      ASSERT_EQ(before_decode.size(), expected.size());
+      for (size_t i = 0; i < before_decode.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(before_decode[i]));
+        EXPECT_NEAR(before_decode[i], expected[i], 1e-3f);
+      }
+    }
+  }
+}
+
+TEST(Qwen3EntroKV, run_activates_compression_and_rejects_cache_resume) {
+  const auto files = causallm_test::makeTinyCausalLMFiles(
+    "Qwen3EntroKV", "compressed_run", "FP32");
+  auto cfg = causallm_test::makeTinyCausalLMConfig(
+    makeQwen3Case(causallm_test::makeTinyFp32DataType()), files.tokenizer_path);
+  cfg.model["model_type"] = "qwen3";
+  cfg.nntrainer["num_to_generate"] = 3;
+  cfg.nntrainer["entrokv"] = {
+    {"beta", 0.5}, {"alpha", 1.0}, {"window", 1}, {"kernel", 1}};
+  TinyQwen3CausalLM method(cfg.model, cfg.generation, cfg.nntrainer);
+  method.initializeModel();
+  setupEntroKVWeights(method);
+  ::testing::internal::CaptureStderr();
+  EXPECT_NO_THROW(method.runPrompt("hello world tok4 tok5"));
+  const auto log = ::testing::internal::GetCapturedStderr();
+  EXPECT_NE(log.find("[EntroKV] active prompt=4"), std::string::npos);
+  EXPECT_TRUE(method.hasRun());
+  EXPECT_THROW(method.runPrompt("hello world"), std::invalid_argument);
+  EXPECT_THROW(method.save_kvcache(files.weight_path.string(), 4),
+               std::invalid_argument);
+  EXPECT_THROW(method.setSessionTokenPosition(4), std::invalid_argument);
+  EXPECT_THROW(method.load_kvcache(files.weight_path.string(), 4),
+               std::invalid_argument);
+}
+
+TEST(Qwen3EntroKV, beta_zero_preserves_unconfigured_run) {
+  const auto files = causallm_test::makeTinyCausalLMFiles(
+    "Qwen3EntroKV", "disabled_run", "FP32");
+  auto cfg = causallm_test::makeTinyCausalLMConfig(
+    makeQwen3Case(causallm_test::makeTinyFp32DataType()), files.tokenizer_path);
+  TinyQwen3CausalLM baseline(cfg.model, cfg.generation, cfg.nntrainer);
+  cfg.nntrainer["entrokv"] = {{"beta", 0}};
+  TinyQwen3CausalLM disabled(cfg.model, cfg.generation, cfg.nntrainer);
+  baseline.initializeModel();
+  disabled.initializeModel();
+  setupEntroKVWeights(baseline);
+  setupEntroKVWeights(disabled);
+  baseline.runPrompt("hello world tok4 tok5");
+  ::testing::internal::CaptureStderr();
+  EXPECT_NO_THROW(disabled.runPrompt("hello world tok4 tok5"));
+  const auto log = ::testing::internal::GetCapturedStderr();
+  EXPECT_EQ(log.find("[EntroKV]"), std::string::npos);
+  EXPECT_EQ(disabled.getOutputText(), baseline.getOutputText());
+}
+
+TEST(Qwen3EntroKV, rejects_nondivisible_gqa_even_when_all_tokens_are_retained) {
+  const auto files =
+    causallm_test::makeTinyCausalLMFiles("Qwen3EntroKV", "invalid_gqa", "FP32");
+  auto cfg = causallm_test::makeTinyCausalLMConfig(
+    makeQwen3Case(causallm_test::makeTinyFp32DataType()), files.tokenizer_path);
+  cfg.model["model_type"] = "qwen3";
+  cfg.model["num_attention_heads"] = 3;
+  cfg.model["num_key_value_heads"] = 2;
+  cfg.model["hidden_size"] = 24;
+  cfg.nntrainer["entrokv"] = {{"beta", 1.0},
+                              {"alpha", 0.0},
+                              {"baseline_entropy", 1.0},
+                              {"window", 1},
+                              {"kernel", 1}};
+  EXPECT_THROW(
+    {
+      TinyQwen3CausalLM model(cfg.model, cfg.generation, cfg.nntrainer);
+      model.initializeModel();
+      setupEntroKVWeights(model);
+      model.runPrompt("hello world tok4 tok5");
+    },
+    std::invalid_argument);
+}
 
 #ifdef ENABLE_FP16
 INSTANTIATE_TEST_SUITE_P(
