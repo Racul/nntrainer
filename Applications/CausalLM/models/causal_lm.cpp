@@ -399,6 +399,31 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
     SAMPLING_SEED = causallm::kDefaultSamplingSeed;
   rng.seed(SAMPLING_SEED);
   global_token_len = 0;
+  obcache_properties_.clear();
+  if (nntr_cfg.contains("obcache")) {
+    const auto &settings = nntr_cfg.at("obcache");
+    if (!settings.is_object())
+      throw std::invalid_argument("obcache must be a JSON object");
+    const auto read = [&](const char *name, unsigned int fallback) {
+      return settings.contains(name)
+               ? OBCacheConfig::parseUnsigned(settings.at(name).dump())
+               : fallback;
+    };
+    OBCacheConfig config{read("budget", 0), read("window", 64),
+                         read("kernel", 5),
+                         settings.value("score", std::string("key"))};
+    config.validate();
+    if (config.budget) {
+      if (cfg.value("model_type", std::string()) != "qwen3" ||
+          nntr_cfg.value("model_tensor_type", std::string()) != "FP32-FP32")
+        throw std::invalid_argument(
+          "OBCache currently supports Qwen3 FP32-FP32 only");
+      obcache_properties_ = {"obcache_budget=" + std::to_string(config.budget),
+                             "obcache_window=" + std::to_string(config.window),
+                             "obcache_kernel=" + std::to_string(config.kernel),
+                             "obcache_score=" + config.score};
+    }
+  }
 }
 
 void CausalLM::allocateAndBindKVCache() {
@@ -947,6 +972,9 @@ std::string CausalLM::kvCacheModelTag() const {
 }
 
 void CausalLM::save_kvcache(std::string path, int to_) {
+  if (!obcache_properties_.empty())
+    throw std::invalid_argument(
+      "OBCache does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     throw std::runtime_error(
       "save_kvcache called before allocateAndBindKVCache()");
@@ -991,6 +1019,9 @@ void CausalLM::setPrecomputedKVCache(const std::string &path,
 }
 
 void CausalLM::load_kvcache(std::string path, int to_) {
+  if (!obcache_properties_.empty())
+    throw std::invalid_argument(
+      "OBCache does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1004,6 +1035,9 @@ void CausalLM::load_kvcache(std::string path, int to_) {
 
 unsigned int CausalLM::resumeFromKVCacheFile(const std::string &path,
                                              unsigned int token_len) {
+  if (!obcache_properties_.empty())
+    throw std::invalid_argument(
+      "OBCache does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1349,6 +1383,14 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
                              "initialize() before run().");
   }
 
+  if (!obcache_properties_.empty() &&
+      (BATCH_SIZE != 1 || SKIP_PREFILL || USE_KVCACHE ||
+       global_token_len != 0 || causallm_engine() != "cpu" ||
+       prefillDriveChunk() != 0))
+    throw std::invalid_argument(
+      "OBCache requires a fresh batch-one CPU run without skipped, cached or "
+      "chunked prefill");
+
   struct StreamerEndGuard {
     BaseStreamer *streamer;
     ~StreamerEndGuard() { streamer_end(streamer); }
@@ -1519,6 +1561,44 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   _input.clear();
 
   unsigned int init_len = init_input.size();
+  if (!obcache_properties_.empty()) {
+    if (!init_len || static_cast<uint64_t>(init_len) + reserved_for_generation >
+                       std::min<uint64_t>(MAX_SEQ_LEN, MAX_POSITION_EMBEDDINGS))
+      throw std::invalid_argument(
+        "OBCache prompt/generation exceeds sequence limits");
+    std::vector<bool> seen(static_cast<size_t>(NUM_LAYERS), false);
+    unsigned int layers = 0;
+    model->forEachLayer(
+      [&](ml::train::Layer &layer, nntrainer::RunLayerContext &, void *) {
+        if (layer.getType() == MHACoreLayer::type) {
+          const auto &name = layer.getName();
+          const auto separator = name.find('_');
+          if (name.compare(0, 5, "layer") != 0 ||
+              separator == std::string::npos)
+            throw std::invalid_argument("Invalid OBCache Qwen3 layer name");
+          const auto index =
+            OBCacheConfig::parseUnsigned(name.substr(5, separator - 5));
+          if (index >= seen.size() || seen[index] ||
+              name != "layer" + std::to_string(index) + "_attention")
+            throw std::invalid_argument("Invalid OBCache Qwen3 layer name");
+          auto properties = obcache_properties_;
+          properties.push_back("obcache_layer=" + std::to_string(index));
+          properties.push_back("obcache_prompt_length=" +
+                               std::to_string(init_len));
+          layer.setProperty(properties);
+          seen[index] = true;
+          ++layers;
+        }
+      },
+      nullptr);
+    if (layers != static_cast<unsigned int>(NUM_LAYERS))
+      throw std::invalid_argument(
+        "OBCache requires an MHA cache in every layer");
+    std::clog << "[OBCache]";
+    for (const auto &property : obcache_properties_)
+      std::clog << " " << property;
+    std::clog << std::endl;
+  }
   float *input_sample =
     (float *)malloc(sizeof(float) * BATCH_SIZE * MAX_SEQ_LEN);
   std::vector<bool> eos_list(BATCH_SIZE, false);

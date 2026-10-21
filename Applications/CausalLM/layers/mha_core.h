@@ -39,6 +39,7 @@
 #include <cpu_backend.h>
 #include <layer_impl.h>
 #include <limits.h>
+#include <obcache.h>
 #include <util_simd.h>
 
 #include <map>
@@ -559,6 +560,8 @@ private:
    *        CausalLM::allocateAndBindKVCache).
    */
   bool use_external_cache = false;
+
+  OBCacheState obcache_; /**< Optional output-aware prompt KV pruning */
 
   /** intermal info */
   size_t num_heads_Q;

@@ -1313,6 +1313,22 @@ void MHACoreLayer::ensure_rope_flat_lut() {
  */
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
+  if (obcache_.enabled() &&
+      (training || !use_external_cache || kv_int8 || use_sink || kv_ring_cap ||
+       !is_causal || skip_prefill || attn_logit_softcapping != 0.0f ||
+       local_window_size != std::numeric_limits<unsigned int>::max() ||
+       nntr_engine_env() != "cpu" || context.getInput(0).batch() != 1 ||
+       context.getInput(0).getDataType() != nntrainer::Tdatatype::FP32 ||
+       context.getInput(1).getDataType() != nntrainer::Tdatatype::FP32 ||
+       context.getInput(2).getDataType() != nntrainer::Tdatatype::FP32))
+    throw std::invalid_argument(
+      "OBCache requires batch-one FP32 causal CPU attention with external KV "
+      "without sinks, sliding windows, rings, int8 KV or skipped prefill");
+#if defined(ENABLE_FP16) && defined(__ANDROID__)
+  if (obcache_.enabled())
+    throw std::invalid_argument(
+      "OBCache does not support Android's FP16 activation narrowing path");
+#endif
   if (!use_external_cache) {
     // 3/4-input (internal KV cache) mode: full-sequence self-attention.
     //
@@ -1375,6 +1391,12 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                              : (unsigned int)query.height();
   unsigned int from = cache_index;
   unsigned int to = cache_index + step_size;
+  if (obcache_.enabled()) {
+    obcache_.checkCache(cache_key, cache_value, num_heads_Q, num_heads_KV,
+                        head_dim);
+    obcache_.checkStep(from, step_size, cache_key.height(),
+                       max_position_embeddings);
+  }
 
   auto get_step_dim = [step_size](const ml::train::TensorDim &dim) {
     auto step_dim = dim;
@@ -1477,6 +1499,21 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
     }
   }
 
+  if (obcache_.enabled() && from == 0) {
+    auto dim = query.getDim();
+    dim.height(step_size);
+    auto rotated_query = query.getSharedDataTensor(dim, 0, true);
+    obcache_.finishPrefill(
+      rotated_query, cache_key, cache_value, num_heads_Q, num_heads_KV,
+      head_dim,
+      [&](nntrainer::Tensor &q, nntrainer::Tensor &k, nntrainer::Tensor &z,
+          nntrainer::Tensor &p, unsigned int position) {
+        compute_kcaches(q, k, z, position, 1, num_heads_Q,
+                        num_heads_Q / num_heads_KV, head_dim);
+        p.copyData(z);
+        softmax_triangle(p, 1, num_heads_Q, position);
+      });
+  }
   cache_index += step_size;
 }
 
@@ -1490,6 +1527,8 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
 void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
                                           unsigned int _from, unsigned int _to,
                                           bool training) {
+  if (obcache_.enabled() && (!use_external_cache || _to <= _from))
+    throw std::invalid_argument("Invalid OBCache external cache step");
   // External KV cache path: from/to are interpreted as the absolute write
   // position; route through forwarding() which reads cache_key/cache_value
   // from input slots 3/4. forwarding() advances cache_index internally.
@@ -1979,6 +2018,32 @@ void MHACoreLayer::one_batch_incremental_forwarding(
   ml::train::TensorDim &cache_key_step_dim,
   ml::train::TensorDim &cache_value_dim,
   ml::train::TensorDim &cache_value_step_dim) {
+
+  if (obcache_.enabled() && cache_index > 0) {
+    const bool use_rope = theta > 0.0f;
+    obcache_.decodeStep(
+      query_step, cache_key, cache_value, cache_index, max_position_embeddings,
+      num_heads_Q, num_heads_KV, head_dim,
+      [&](nntrainer::Tensor &k, nntrainer::Tensor &v) {
+        apply_rotary_emb_tensor_v2(key_step, k, head_dim, cache_index,
+                                   use_rope);
+        apply_rotary_emb_tensor_v2(value_step, v, head_dim, cache_index, false);
+        if (use_rope)
+          apply_rotary_emb_tensor_v2(query_step, query_step, head_dim,
+                                     cache_index);
+      },
+      [&](nntrainer::Tensor &k, nntrainer::Tensor &v, nntrainer::Tensor &p,
+          unsigned int physical_from) {
+        const unsigned int group = num_heads_Q / num_heads_KV;
+        compute_kcaches(query_step, k, p, physical_from, 1, num_heads_Q, group,
+                        head_dim);
+        softmax_triangle(p, 1, num_heads_Q, physical_from);
+        compute_fp16vcache_transposed(p, v, attention_output_step,
+                                      physical_from, num_heads_KV, group,
+                                      head_dim, physical_from + 1);
+      });
+    return;
+  }
 
   /**
    *
@@ -6163,9 +6228,12 @@ void MHACoreLayer::setProperty(const std::vector<std::string> &values) {
   for (const auto &value : values) {
     std::string key;
     std::string parsed_value;
-    if (nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE &&
-        key == "cache_index") {
+    const bool parsed =
+      nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE;
+    if (parsed && key == "cache_index") {
       setCacheIndex(static_cast<unsigned int>(std::stoul(parsed_value)));
+    } else if (parsed && obcache_.consumeProperty(key, parsed_value)) {
+      continue;
     } else {
       props.push_back(value);
     }
