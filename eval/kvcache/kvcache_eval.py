@@ -823,7 +823,8 @@ def write_perf_summary(out, manifest, records):
              f"Input: LongBench v1 {source['task']} #{source['index']}, official prompt and middle truncation "
              f"(limit→actual tokens: {actual}); at most {protocol['n_gen']} decode steps, "
              f"max_seq_len {protocol['max_seq_len']}, original sampling/EOS, "
-             f"{protocol['repetitions']} latency + {protocol['repetitions']} memory trials per input and condition.",
+             f"{protocol.get('latency_repetitions', protocol.get('repetitions'))} latency + "
+             f"{protocol.get('memory_repetitions', protocol.get('repetitions'))} memory trials per input and condition.",
              f"Status: {manifest.get('status')}; valid trials {sum(r['valid'] for r in records)}/{manifest['expected']}.", "",
              "Mean ± sample SD over valid trials; function checks are excluded.", "",
              "|Input|Metric|" + "|".join(labels) + "".join(f"|{m} vs baseline (%)" for m in deltas) + "|n|",
@@ -893,7 +894,8 @@ def evaluate_perf(args):
         raise ValueError("--max-seq-len must hold the longest prompt + 1 + --n-gen")
     protocol.update(
         kind="perf", contexts=args.contexts, n_gen=args.n_gen, max_seq_len=max_seq_len,
-        repetitions=args.repeat, interval_seconds=args.interval, warmup=0,
+        latency_repetitions=args.repeat, memory_repetitions=args.memory_repeat,
+        interval_seconds=args.interval, warmup=0,
         perf_input=dict(benchmark="LongBench v1", task=task, index=int(index), dataset_sha256=sha(path),
                         prompt_config_sha256=sha(args.official / "config/dataset2prompt.json"),
                         prompts={str(c): {k: case[k] for k in ("tokens", "prompt_ids_sha256", "truncated",
@@ -905,8 +907,8 @@ def evaluate_perf(args):
     labels = protocol["conditions"]
     plan = [("function", min(args.contexts), label, 0, position) for position, label in enumerate(labels, 1)]
     for context in args.contexts:
-        for phase in ("latency", "memory"):
-            for trial in range(1, args.repeat + 1):
+        for phase, trials in (("latency", args.repeat), ("memory", args.memory_repeat)):
+            for trial in range(1, trials + 1):
                 # Rotate the condition order per trial (alternation for two).
                 shift = (trial - 1) % len(labels)
                 order = labels[shift:] + labels[:shift]
@@ -1048,7 +1050,9 @@ def main():
     perf.add_argument("--contexts", default="512,1024,2048", help="comma-separated prompt token limits")
     perf.add_argument("--n-gen", type=int, default=128, help="maximum decode steps (default 128)")
     perf.add_argument("--max-seq-len", type=int, help="cache capacity (default: max(2048, longest limit) + n-gen)")
-    perf.add_argument("--repeat", type=int, default=3, help="latency and memory trials each (default 3)")
+    perf.add_argument("--repeat", type=int, default=3, help="latency trials per input and condition (default 3)")
+    perf.add_argument("--memory-repeat", type=int, default=1,
+                      help="memory trials per input and condition (default 1)")
     perf.add_argument("--interval", type=float, default=1.0, help="seconds between trials (default 1)")
 
     summary = commands.add_parser("report", help="rewrite summary.md from records")
@@ -1072,8 +1076,9 @@ def main():
         except ValueError:
             parser.error("--contexts must be comma-separated integers")
         if (not args.contexts or min(args.contexts) < 1 or len(set(args.contexts)) != len(args.contexts)
-                or args.n_gen < 1 or args.repeat < 1 or args.interval < 0):
-            parser.error("positive unique contexts, n-gen and repeat, and a nonnegative interval are required")
+                or args.n_gen < 1 or args.repeat < 1 or args.memory_repeat < 1 or args.interval < 0):
+            parser.error("positive unique contexts, n-gen, repeat and memory-repeat, and a nonnegative "
+                         "interval are required")
         evaluate_perf(args)
     else:
         report(args)
