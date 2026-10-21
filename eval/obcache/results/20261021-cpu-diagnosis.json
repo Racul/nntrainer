@@ -1,0 +1,155 @@
+{
+  "kind": "Root-cause diagnosis, not replacement benchmark results",
+  "inference_source_unchanged": true,
+  "original_measured_artifacts_unchanged": true,
+  "full_model_profile": {
+    "context": 4096,
+    "completed_layers": 5,
+    "model_layers": 28,
+    "stopped_intentionally": true,
+    "valid_full_inference_trial": false,
+    "reason": "Several complete real-model layers establish the dominant stage; stop further full-model work and isolate that stage in a bounded kernel experiment. This is NOT a valid full inference trial.",
+    "stages_ms": {
+      "total_ms": 113411.0,
+      "row_ms": 1244.566,
+      "buffers_ms": 37.13767,
+      "accumulate_ms": 112107.8,
+      "gqa_output_ms": 54037.15,
+      "prefix_score_ms": 58063.73,
+      "compact_ms": 11.04957
+    },
+    "accumulation_share_pct": 98.85090511502412
+  },
+  "kernel": {
+    "status": "COMPLETE",
+    "kind": "bounded synthetic kernel ablation; not model latency, not paper accuracy, not part of the 72 trials",
+    "query_rows": 8,
+    "sequence_rows": 4096,
+    "heads": {
+      "query": 16,
+      "kv": 8
+    },
+    "head_dim": 128,
+    "score": "key",
+    "precision": "same UINT16 half-bit V; double reductions; cached variant converts the same rounded values to FP32 once",
+    "threads": "one scoring thread; affinity CPU0",
+    "rows": [
+      {
+        "trial": 1,
+        "variant": "original",
+        "ms": 1934.563061,
+        "conversion_ms": 0,
+        "max_abs_score_error": 0,
+        "checksum": 0.0334408179613
+      },
+      {
+        "trial": 1,
+        "variant": "cached_access_key_specialized",
+        "ms": 1214.441281,
+        "conversion_ms": 0,
+        "max_abs_score_error": 0,
+        "checksum": 0.0334408179613
+      },
+      {
+        "trial": 1,
+        "variant": "convert_V_once_cached_access_key_specialized",
+        "ms": 332.997541,
+        "conversion_ms": 70.64656,
+        "max_abs_score_error": 0,
+        "checksum": 0.0334408179613
+      },
+      {
+        "trial": 2,
+        "variant": "original",
+        "ms": 1940.713723,
+        "conversion_ms": 0,
+        "max_abs_score_error": 0,
+        "checksum": 0.0334408179613
+      },
+      {
+        "trial": 2,
+        "variant": "cached_access_key_specialized",
+        "ms": 1158.96605,
+        "conversion_ms": 0,
+        "max_abs_score_error": 0,
+        "checksum": 0.0334408179613
+      },
+      {
+        "trial": 2,
+        "variant": "convert_V_once_cached_access_key_specialized",
+        "ms": 248.980315,
+        "conversion_ms": 63.137943,
+        "max_abs_score_error": 0,
+        "checksum": 0.0334408179613
+      },
+      {
+        "trial": 3,
+        "variant": "original",
+        "ms": 1578.708841,
+        "conversion_ms": 0,
+        "max_abs_score_error": 0,
+        "checksum": 0.0334408179613
+      },
+      {
+        "trial": 3,
+        "variant": "cached_access_key_specialized",
+        "ms": 1006.903527,
+        "conversion_ms": 0,
+        "max_abs_score_error": 0,
+        "checksum": 0.0334408179613
+      },
+      {
+        "trial": 3,
+        "variant": "convert_V_once_cached_access_key_specialized",
+        "ms": 251.737556,
+        "conversion_ms": 52.149147,
+        "max_abs_score_error": 0,
+        "checksum": 0.0334408179613
+      }
+    ],
+    "variants": {
+      "original": {
+        "n": 3,
+        "mean_ms": 1817.9952083333333,
+        "sd_ms": 207.25089108239513
+      },
+      "cached_access_key_specialized": {
+        "n": 3,
+        "mean_ms": 1126.770286,
+        "sd_ms": 107.44954745599856
+      },
+      "convert_V_once_cached_access_key_specialized": {
+        "n": 3,
+        "mean_ms": 277.90513733333336,
+        "sd_ms": 47.73133458024436
+      }
+    },
+    "command": [
+      "taskset",
+      "-c",
+      "0",
+      "/home/jmsmlove02/26-2/nntrainer/build/validation/obcache-diagnosis/kernel_probe"
+    ],
+    "wall_s": 9.860760749000292,
+    "child_user_s": 8.646377,
+    "child_system_s": 0.502974,
+    "binary_sha256": "bdd73e9658252eb30dcd1d569d40586afa99150425169663b12111af7a3dc6dc"
+  },
+  "derived_counts": {
+    "full_4k_value_read_and_scalar_half_conversion_calls": 14857142272,
+    "full_capacity_kv_payload_mib": 462.109375,
+    "compact_prompt256_plus_decode128_payload_mib": 42.0
+  },
+  "raw_artifacts_sha256": {
+    "prefill-4096.log": "80c8a2f0775e4fa0b41160e0af760e7fc64b761e34f49c9ccac73d0e0b4e0fd0",
+    "tiny-activation.log": "e82854dbb18105bb7e1aaedcd4c49dc1529415508951e4f3c6582cdccbd2e043",
+    "kernel-results.jsonl": "21c63c5e682b41b09ecb48f30809c49a7a0ca3d0775b255322ad716ddfe9d673",
+    "kernel_probe.cpp": "a2f9c9e8a7befe8626f725a9a71765af81dd21d7a99a2cf968887edabb298048",
+    "include/obcache.h": "64f16aaae14498a3c3edca43795fda27bfa947343bafe98218830b8b716a1ebb",
+    "include/probe_obcache.h": "518e46b9b876628df01fbf0c98b1570e99468d9e5678080b10f00de811b4b069",
+    "vectorization-missed.txt": "5a6d7ecd8ef56a7328db1b09a7d29f51b0f35083fc0822b76c85ff77243876ec"
+  },
+  "publication_note": "Previously collected diagnostics, published after the original benchmark. No new model execution for this documentation update. Original 72 trials and result JSON remain unchanged.",
+  "evaluated_feature_commit": "5dc319a9e2033fb69e7eae33367589114f42c9d2",
+  "raw_archive": "build/validation/obcache-diagnosis/"
+}

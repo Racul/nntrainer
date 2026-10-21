@@ -6,12 +6,23 @@ On 2026-10-21 the user authorized builds, tests, Linux/native Windows
 performance measurements and a report/PR. LongBench is explicitly excluded
 from this run. Validation and measurement results are linked below.
 
+This CPU port did not improve end-to-end latency: Linux +153.3% and native
+Windows +45.5%, with nearly unchanged sampled peak memory. GPU efficiency
+results in the paper do not establish on-device CPU speedups. This port's
+scalar scoring overhead and unchanged KV allocations limit its usefulness.
+See the [report and CPU limitations](results/20261021-cpu.md) and the
+[follow-up implementation plan](implementation-plan.md). The plan is not implemented.
+
 ## Algorithm and configuration
 
-The policy follows [OBCache](https://arxiv.org/abs/2510.07651), equations
-(5)-(7), and the official
+The port uses OBCache's output-aware scoring expressions and the official
 [`OBCacheSnapKVPress`](https://github.com/DreamSoul-AI/OBCache/blob/189ffadd7b2f29eaf311e67f39dbf2a26f5f4dd3/kvpress/presses/obcache_press.py)
 at revision `189ffadd7b2f29eaf311e67f39dbf2a26f5f4dd3`.
+It is not a complete reproduction of [paper v4](https://arxiv.org/html/2510.07651v4).
+In particular, Appendix A.5 sums per-query-head scores within a KV group,
+whereas this port follows the pinned code's `pre_redc` default, averaging
+attention/logits before scoring. These nonlinear operations are not equivalent
+and can select different tokens. Paper-matching GQA remains in the follow-up plan.
 OBCache provides scores for an eviction policy; this port uses the official
 SnapKV observation-window policy with a uniform absolute prompt budget.
 It does not use PyramidKV layer budgets or H2O online eviction.
@@ -40,7 +51,7 @@ protected values. Scores for each older token are:
 | `key` | `(A*Z)² * ||V-O||²` |
 | `joint` | `A² * ||V + Z*(V-O)||²` |
 
-The joint expression is algebraically equivalent to equation (7) including
+The joint expression is algebraically equivalent to the joint-score expression including
 its cross term, while avoiding subtraction of large squared norms.
 Scaled logits are preserved before softmax; logarithms of probabilities are
 not a substitute for these logits. Scoring uses the actual cached V, including
@@ -154,5 +165,10 @@ RssAnon+accelerator footprint. The published helper now reads OS ru_maxrss from
 preserving the legacy CLI value and raw manifests. Primary latency and sampled
 RSS results are unchanged. The exact helper used during collection is archived
 at `build/validation/obcache-run/evaluation-helper-used.py` for provenance/resume.
+
+The original result JSON freezes the source/document hashes from the evaluated
+revision. Later documentation and already-collected diagnostic findings do not
+change those trials. The report links a separate diagnostic JSON; a partial
+five-layer profile and synthetic kernel trials are excluded from the 72 runs.
 
 Results: [CPU performance tables](results/20261021-cpu.md) and [audited trials/provenance](results/20261021-cpu.json).
