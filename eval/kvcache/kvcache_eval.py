@@ -75,15 +75,17 @@ PERF_COLUMNS = (
     "prefill_ms prefill_tps generation_ms generation_tps total_ms e2e_ms sampled_peak_rss_kib "
     "samples target_pid os_peak_rss_kib reported_peak_kib duration_s started_at valid failure stdout_log"
 ).split()
-# (phase, key, label, direction of improvement); time/memory use the
-# reduction rate and TPS the increase rate, both positive when better.
+# (phase, key, label); change is (method / baseline − 1) × 100 for every
+# metric, so negative is a decrease and positive an increase.
 PERF_METRICS = (
-    ("latency", "total_ms", "total (ms)", "lower"),
-    ("latency", "e2e_ms", "e2e incl. loading (ms)", "lower"),
-    ("latency", "prefill_tps", "prefill TPS", "higher"),
-    ("latency", "generation_tps", "decode TPS", "higher"),
-    ("memory", "sampled_peak_rss_mib", "sampled peak RSS (MiB)", "lower"),
-    ("latency", "os_peak_rss_mib", "OS peak RSS, reference (MiB)", "lower"),
+    ("latency", "total_s", "total (s)"),
+    ("latency", "e2e_s", "e2e incl. loading (s)"),
+    ("latency", "prefill_s", "prefill (s)"),
+    ("latency", "generation_s", "decode (s)"),
+    ("latency", "prefill_tps", "prefill TPS"),
+    ("latency", "generation_tps", "decode TPS"),
+    ("memory", "sampled_peak_rss_mib", "sampled peak RSS (MiB)"),
+    ("latency", "os_peak_rss_mib", "OS peak RSS, reference (MiB)"),
 )
 
 
@@ -595,11 +597,11 @@ def log_paths(out, folder, stem):
     return stdout_path, stderr_path
 
 
-def mean_sd(values):
+def mean_sd(values, digits=2):
     if not values:
         return "N/A"
-    return f"{statistics.mean(values):.2f} ± {statistics.stdev(values):.2f}" if len(values) > 1 \
-        else f"{values[0]:.2f} ± N/A"
+    return f"{statistics.mean(values):.{digits}f} ± {statistics.stdev(values):.{digits}f}" if len(values) > 1 \
+        else f"{values[0]:.{digits}f} ± N/A"
 
 
 # ---------------------------------------------------------------------------
@@ -806,10 +808,16 @@ def perf_values(records, phase, context, label, key):
     for r in records:
         if not (r["valid"] and r["phase"] == phase and r["context"] == context and r["condition"] == label):
             continue
-        # MiB views of the kB fields: MiB = kB / 1024.
-        raw = r.get(key[:-4] + "_kib") if key.endswith("_mib") else r.get(key)
+        # MiB views of the kB fields (MiB = kB / 1024) and second views of
+        # the ms fields (s = ms / 1000).
+        if key.endswith("_mib"):
+            raw, scale = r.get(key[:-4] + "_kib"), 1024
+        elif key.endswith("_s"):
+            raw, scale = r.get(key[:-2] + "_ms"), 1000
+        else:
+            raw, scale = r.get(key), 1
         if raw is not None:
-            values.append(raw / 1024 if key.endswith("_mib") else raw)
+            values.append(raw / scale)
     return values
 
 
@@ -830,14 +838,14 @@ def write_perf_summary(out, manifest, records):
              "|Input|Metric|" + "|".join(labels) + "".join(f"|{m} vs baseline (%)" for m in deltas) + "|n|",
              "|---|---" + "|---" * (len(labels) + len(deltas)) + "|---|"]
     for context in protocol["contexts"]:
-        for phase, key, name, better in PERF_METRICS:
+        for phase, key, name in PERF_METRICS:
             values = {label: perf_values(records, phase, context, label, key) for label in labels}
-            cells = [mean_sd(values[label]) for label in labels]
+            cells = [mean_sd(values[label], 3 if key.endswith("_s") else 2) for label in labels]
             for method in deltas:
                 base, value = values["baseline"], values[method]
                 if base and value and statistics.mean(base):
                     b, m = statistics.mean(base), statistics.mean(value)
-                    cells.append(f"{((b - m) if better == 'lower' else (m - b)) / b * 100:+.2f}")
+                    cells.append(f"{(m / b - 1) * 100:+.2f}")
                 else:
                     cells.append("N/A")
             ns = "/".join(str(len(values[label])) for label in labels)
@@ -846,8 +854,8 @@ def write_perf_summary(out, manifest, records):
                        and r["condition"] == label and r.get("early_eos"))) for label in labels]
         lines.append(f"|{context}|early EOS (latency trials)|" + "|".join(eos) + "|" * len(deltas) + "||")
     lines += ["",
-              "Change follows metric.md: time and memory use (baseline − method) / baseline × 100, TPS uses",
-              "(method − baseline) / baseline × 100, so positive is an improvement in both.",
+              "Change follows metric.md: (method / baseline − 1) × 100 for every metric, so negative is a",
+              "decrease and positive an increase (lower time and memory are better, higher TPS is better).",
               "Latency rows come from latency trials; sampled peak RSS comes from separate trials run under the",
               "original Applications/utils/mem_usage.sh (smaps Rss sum, 1 s sampling, can miss spikes, fewer",
               "samples below 30 s). OS peak RSS is CausalLM's ru_maxrss line, a reference only.",

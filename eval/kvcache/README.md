@@ -93,11 +93,7 @@ A trial is valid only if all of the following hold:
 
 A memory trial also needs the target PID, positive RSS samples, a peak equal to the largest sample, and no `smaps` read error.
 
-`summary.md` reports mean ± sample SD, n, and the change from baseline as in the metric definition:
-- time and memory: `(baseline − method) / baseline × 100`;
-- TPS: `(method − baseline) / baseline × 100`.
-
-Positive is an improvement in both. Raw values are in `trials.jsonl` and `trials.csv`. Latency comes only from latency trials and memory only from memory trials. Sampled RSS uses the script's 1 s sampling and can miss spikes. Temperature and CPU frequency are N/A on WSL.
+`summary.md` reports mean ± sample SD, n, and the change from baseline as in the metric definition: `(method / baseline − 1) × 100` for every metric. Negative is a decrease and positive an increase, so a faster or smaller method shows a negative time or memory change and a positive TPS change. Times are in seconds. Raw values are in `trials.jsonl` and `trials.csv`. Latency comes only from latency trials and memory only from memory trials. Sampled RSS uses the script's 1 s sampling and can miss spikes. Temperature and CPU frequency are N/A on WSL.
 
 ## Output quality (`quality`)
 
