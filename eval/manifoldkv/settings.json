@@ -1,0 +1,8 @@
+{
+  "skip_prefill": false,
+  "manifoldkv": {
+    "enabled": true,
+    "keep_ratio": 0.8,
+    "centroid_window": 0
+  }
+}
