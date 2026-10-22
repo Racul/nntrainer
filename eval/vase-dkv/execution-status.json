@@ -1,0 +1,27 @@
+{
+  "method": "VaSE-DKV",
+  "branch": "vase-dkv",
+  "baseline_commit": "7d14d001c9e70014de515dbd00ee6986d50d365f",
+  "status": "awaiting_user_signal",
+  "build_run": false,
+  "tests_run": false,
+  "inference_run": false,
+  "benchmark_run": false,
+  "sequential_order": [
+    "manifoldkv",
+    "vase-dkv",
+    "dropkv"
+  ],
+  "platforms": [
+    "Linux",
+    "native Windows"
+  ],
+  "trials_per_condition": 3,
+  "longbench": "excluded",
+  "paper": "https://arxiv.org/html/2606.03928v1",
+  "official_source": {
+    "repo": "terarachang/VaSE",
+    "commit": "a7a523d8cde1ff9248925c4978ba8ffe7b3630bc",
+    "file": "eval/reasoning_tasks/modified/transformers/cache_utils.py"
+  }
+}
