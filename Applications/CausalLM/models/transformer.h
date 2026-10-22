@@ -483,6 +483,10 @@ public:
    * every other layer keeps the full context window.
    */
   unsigned int getKVCacheRows(int layer_id) const {
+    // Enabled attention owns its compact cache; preserve the graph's input
+    // alias topology with one-row binding placeholders, without a full slab.
+    if (!compact_kv_properties_.empty())
+      return 1u;
     // The layer side (mha_core::finalize) reaches the same verdict by feeding
     // the same two facts to the same predicate: usesAttentionSink() is the
     // model's answer to mha_core's `use_sink` property, and this cache IS the
@@ -587,6 +591,10 @@ public:
   virtual void resetLogitsProcessor() {}
 
 protected:
+  /** Compression settings fixed before graph construction. Empty is baseline.
+   */
+  std::vector<std::string> compact_kv_properties_;
+
   /**
    * @brief Setup the parameters for the Transformer model
    */

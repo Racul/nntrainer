@@ -41,6 +41,8 @@
 #include <limits.h>
 #include <util_simd.h>
 
+#include "dropkv.h"
+
 #include <map>
 #include <string>
 #include <tuple>
@@ -501,6 +503,10 @@ public:
   inline static const std::string type = "mha_core";
 
 private:
+  DropKVState compact_kv_;
+  void forwardCompactKV(nntrainer::RunLayerContext &context, unsigned int step,
+                        bool training);
+
   std::tuple<
     nntrainer::props::NumHeads, props::NumHeads_KV,
     nntrainer::props::ProjectedKeyDim, nntrainer::props::ProjectedValueDim,

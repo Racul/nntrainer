@@ -399,6 +399,36 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
     SAMPLING_SEED = causallm::kDefaultSamplingSeed;
   rng.seed(SAMPLING_SEED);
   global_token_len = 0;
+  compact_kv_properties_.clear();
+  if (nntr_cfg.contains("dropkv")) {
+    const auto &settings = nntr_cfg.at("dropkv");
+    if (!settings.is_object())
+      throw std::invalid_argument("dropkv must be a JSON object");
+    if (settings.value("enabled", false)) {
+      DropKVConfig method;
+      method.keep_ratio =
+        kvRatio(settings.value("keep_ratio", json(0.1)).dump());
+      method.window = kvUnsigned(settings.value("window", json(8)).dump());
+      method.kernel = kvUnsigned(settings.value("kernel", json(11)).dump());
+      method.pooling = settings.value("pooling", std::string("max"));
+      method.validate();
+      if (cfg.value("model_type", std::string()) != "qwen3" ||
+          MODEL_TENSOR_TYPE != "FP32-FP32" || BATCH_SIZE != 1 ||
+          causallm_engine() != "cpu" || SKIP_PREFILL || USE_KVCACHE ||
+          NUM_TO_GENERATE <= 0 || !IS_CAUSAL || SLIDING_WINDOW != UINT_MAX ||
+          std::getenv("NNTR_KV_INT8") || prefillDriveChunk() != 0 ||
+          nntr_env_on("NNTR_KV_WINDOW_RING"))
+        throw std::invalid_argument(
+          "DropKV requires Qwen3 FP32-FP32 CPU, batch one, fresh full "
+          "prefill, bounded generation, no skip_prefill/int8/ring/cache file");
+      compact_kv_properties_ = {
+        "dropkv_enabled=1",
+        "dropkv_keep_ratio=" + settings.value("keep_ratio", json(0.1)).dump(),
+        "dropkv_window=" + std::to_string(method.window),
+        "dropkv_kernel=" + std::to_string(method.kernel),
+        "dropkv_pooling=" + method.pooling};
+    }
+  }
 }
 
 void CausalLM::allocateAndBindKVCache() {
@@ -947,6 +977,9 @@ std::string CausalLM::kvCacheModelTag() const {
 }
 
 void CausalLM::save_kvcache(std::string path, int to_) {
+  if (!compact_kv_properties_.empty())
+    throw std::invalid_argument(
+      "Compressed KV cache serialization is unsupported");
   if (!kv_cache.isAllocated()) {
     throw std::runtime_error(
       "save_kvcache called before allocateAndBindKVCache()");
@@ -974,6 +1007,9 @@ static inline void retire_decode_capture() {
 }
 
 void CausalLM::setSessionTokenPosition(unsigned int pos) {
+  if (!compact_kv_properties_.empty() && pos != 0)
+    throw std::invalid_argument(
+      "Compressed KV cannot resume at a nonzero position");
   USE_KVCACHE = false;
   PRE_COMPUTED_CACHE_PATH.clear();
   SYS_PROMP_LEN = 0;
@@ -983,6 +1019,9 @@ void CausalLM::setSessionTokenPosition(unsigned int pos) {
 
 void CausalLM::setPrecomputedKVCache(const std::string &path,
                                      unsigned int sys_prompt_token_len) {
+  if (!compact_kv_properties_.empty())
+    throw std::invalid_argument(
+      "Compressed KV cache serialization is unsupported");
   USE_KVCACHE = !path.empty();
   PRE_COMPUTED_CACHE_PATH = path;
   SYS_PROMP_LEN = USE_KVCACHE ? sys_prompt_token_len : 0;
@@ -991,6 +1030,9 @@ void CausalLM::setPrecomputedKVCache(const std::string &path,
 }
 
 void CausalLM::load_kvcache(std::string path, int to_) {
+  if (!compact_kv_properties_.empty())
+    throw std::invalid_argument(
+      "Compressed KV cache serialization is unsupported");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1349,6 +1391,12 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
                              "initialize() before run().");
   }
 
+  if (!compact_kv_properties_.empty() &&
+      (global_token_len || USE_KVCACHE || SKIP_PREFILL || prefillDriveChunk() ||
+       causallm_engine() != "cpu"))
+    throw std::invalid_argument(
+      "Compressed KV requires a fresh full CPU prefill");
+
   struct StreamerEndGuard {
     BaseStreamer *streamer;
     ~StreamerEndGuard() { streamer_end(streamer); }
@@ -1519,6 +1567,26 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   _input.clear();
 
   unsigned int init_len = init_input.size();
+  if (!compact_kv_properties_.empty()) {
+    if (!init_len || performance_metrics.prompt_truncated_tokens ||
+        static_cast<uint64_t>(init_len) + reserved_for_generation >
+          std::min<uint64_t>(MAX_SEQ_LEN, MAX_POSITION_EMBEDDINGS))
+      throw std::invalid_argument(
+        "Compressed KV prompt exceeds the full-prefill plane or logical limit");
+    unsigned int count = 0;
+    model->forEachLayer(
+      [&](ml::train::Layer &layer, nntrainer::RunLayerContext &, void *) {
+        if (layer.getType() == MHACoreLayer::type) {
+          layer.setProperty(
+            {"dropkv_prompt_length=" + std::to_string(init_len)});
+          ++count;
+        }
+      },
+      nullptr);
+    if (count != static_cast<unsigned int>(NUM_LAYERS))
+      throw std::invalid_argument(
+        "Compressed KV requires one MHA per model layer");
+  }
   float *input_sample =
     (float *)malloc(sizeof(float) * BATCH_SIZE * MAX_SEQ_LEN);
   std::vector<bool> eos_list(BATCH_SIZE, false);
