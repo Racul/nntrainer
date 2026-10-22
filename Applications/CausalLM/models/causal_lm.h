@@ -86,6 +86,10 @@ public:
   static void releaseDeviceCaches();
 
 protected:
+  /** @brief Run a bounded-cache stream without truncating to max_seq_len. */
+  void runStreamingLLM(const WSTR &prompt, bool do_sample,
+                       const WSTR &system_prompt, const WSTR &tail_prompt,
+                       bool log_output);
   /**
    * @brief One-shot CUDA prewarm guard, PER MODEL OBJECT. A function-local
    *        static was process-lifetime, so the second load of a load/destroy
@@ -156,7 +160,8 @@ public:
   void resetLogitsProcessor() override;
 
   /**
-   * @brief Current KV-cache write position (absolute token position)
+   * @brief Current KV-cache length. StreamingLLM reports retained rows;
+   * getSessionTokenPosition() reports its absolute stream position.
    */
   int getKvLen() const override {
     return static_cast<int>(kv_cache.getPosition());

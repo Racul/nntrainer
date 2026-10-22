@@ -97,6 +97,7 @@ Applications/**/tokenizers-build/*
 
 # log files
 *.log
+logs/streaming_llm/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

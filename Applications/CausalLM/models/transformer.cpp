@@ -325,6 +325,33 @@ void Transformer::setupParameters(json &cfg, json &generation_cfg,
     }
   }
   MAX_SEQ_LEN = nntr_cfg["max_seq_len"];
+  streaming_llm = {};
+  if (nntr_cfg.contains("streaming_llm")) {
+    if (strToModelType(nntr_cfg.value("model_type", std::string())) !=
+          ModelType::CAUSALLM ||
+        cfg.value("model_type", std::string()) != "qwen3")
+      throw std::invalid_argument(
+        "StreamingLLM currently supports Qwen3 CausalLM only");
+    const auto &settings = nntr_cfg.at("streaming_llm");
+    if (!settings.is_object())
+      throw std::invalid_argument("streaming_llm must be a JSON object");
+    for (auto it = settings.begin(); it != settings.end(); ++it)
+      if (it.key() != "sink_tokens" && it.key() != "recent_tokens")
+        throw std::invalid_argument("Unknown streaming_llm setting: " +
+                                    it.key());
+    streaming_llm.sink_tokens =
+      settings.contains("sink_tokens")
+        ? StreamingLLMConfig::parseUnsigned(settings.at("sink_tokens").dump())
+        : 4;
+    streaming_llm.recent_tokens =
+      settings.contains("recent_tokens")
+        ? StreamingLLMConfig::parseUnsigned(settings.at("recent_tokens").dump())
+        : 252;
+    if (!streaming_llm.enabled() ||
+        streaming_llm.capacity() > static_cast<unsigned int>(MAX_SEQ_LEN))
+      throw std::invalid_argument("StreamingLLM needs positive recent_tokens "
+                                  "and a cache fitting max_seq_len");
+  }
   // num_to_generate is optional: absent (or <= 0) means "no explicit cap",
   // i.e. generate until EOS or until the context window runs out. 0 is the
   // sentinel every consumer below tests for.

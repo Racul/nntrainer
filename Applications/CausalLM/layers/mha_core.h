@@ -39,6 +39,7 @@
 #include <cpu_backend.h>
 #include <layer_impl.h>
 #include <limits.h>
+#include <streaming_llm.h>
 #include <util_simd.h>
 
 #include <map>
@@ -501,6 +502,12 @@ public:
   inline static const std::string type = "mha_core";
 
 private:
+  StreamingLLMConfig streaming_llm;
+
+  /** @brief Attend over raw cached keys with contiguous cache-local RoPE. */
+  void forwardingStreamingLLM(nntrainer::RunLayerContext &context,
+                              bool training);
+
   std::tuple<
     nntrainer::props::NumHeads, props::NumHeads_KV,
     nntrainer::props::ProjectedKeyDim, nntrainer::props::ProjectedValueDim,

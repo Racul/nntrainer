@@ -1240,6 +1240,8 @@ void MHACoreLayer::finalize(nntrainer::InitLayerContext &context) {
 // per-layer-transition re-upload from ~33-67MB to ~256-512KB was worth ~+500
 // TPS at M=1024.)
 unsigned int MHACoreLayer::rope_lut_positions() const {
+  if (streaming_llm.enabled())
+    return streaming_llm.attentionCapacity();
   unsigned int cap =
     (unsigned int)std::get<nntrainer::props::MaxTimestep>(mha_core_props).get();
   if (const char *e = std::getenv("NNTR_ROPE_LUT_CAP"))
@@ -1311,8 +1313,143 @@ void MHACoreLayer::ensure_rope_flat_lut() {
  *         input[3] = cache_key   (B, 1, max_seq_len, num_heads_KV * head_dim)
  *         input[4] = cache_value (B, 1, max_seq_len, num_heads_KV * head_dim)
  */
+void MHACoreLayer::forwardingStreamingLLM(nntrainer::RunLayerContext &context,
+                                          bool training) {
+  auto &query = context.getInput(INOUT_INDEX::QUERY);
+  if (training || !use_external_cache || !is_causal || use_sink ||
+      skip_prefill || local_window_size != UINT_MAX || kv_ring_cap || kv_int8 ||
+      query.batch() != 1 || query.channel() != 1 || query.isClMem() ||
+      (!nntr_engine_env().empty() && nntr_engine_env() != "cpu"))
+    throw std::invalid_argument(
+      "StreamingLLM requires batch-one CPU causal inference with external "
+      "cache and without sliding windows, learned sinks or skipped prefill");
+
+  auto &key = context.getInput(INOUT_INDEX::KEY);
+  auto &value = context.getInput(INOUT_INDEX::VALUE);
+  auto &output = context.getOutput(INOUT_INDEX::OUTPUT);
+  auto &cache_key = context.getInput(3);
+  auto &cache_value = context.getInput(4);
+  const unsigned int capacity = streaming_llm.capacity();
+  const unsigned int attention_capacity = streaming_llm.attentionCapacity();
+  const unsigned int step =
+    incremental_step_size ? incremental_step_size : query.height();
+  const auto host_tensor = [](const nntrainer::Tensor &tensor) {
+    const auto memory = tensor.getMemoryData();
+    return !tensor.isClMem() && (!memory || !memory->isSVM());
+  };
+  if (!step || step > query.height() || step > key.height() ||
+      step > value.height() || step > output.height() ||
+      step > UINT_MAX - cache_index || capacity > max_position_embeddings ||
+      capacity >
+        std::get<nntrainer::props::MaxTimestep>(mha_core_props).get() ||
+      cache_key.height() != capacity ||
+      cache_value.getDim() != cache_key.getDim() ||
+      cache_key.width() != num_heads_KV * head_dim ||
+      cache_key.channel() != 1 || cache_key.batch() != 1 ||
+      !host_tensor(query) || !host_tensor(key) || !host_tensor(value) ||
+      !host_tensor(output) || !host_tensor(cache_key) ||
+      !host_tensor(cache_value) ||
+      (cache_key.getDataType() != ml::train::TensorDim::DataType::UINT16 &&
+       cache_key.getDataType() != ml::train::TensorDim::DataType::FP16))
+    throw std::invalid_argument("Invalid StreamingLLM step or cache geometry");
+
+  // Bounded scratch per call, reused for every row in a long chunk.
+  // The owned cache holds raw keys; rotating scratch avoids cumulative
+  // precision loss from repeatedly undoing and reapplying RoPE after eviction.
+  auto key_dim = cache_key.getDim();
+  key_dim.height(attention_capacity);
+  key_dim.setDataType(ml::train::TensorDim::DataType::FP32);
+  nntrainer::Tensor raw_keys(key_dim, true);
+  auto scratch_dim = cache_key.getDim();
+  scratch_dim.height(attention_capacity);
+  nntrainer::Tensor rotated_keys(scratch_dim, true);
+  nntrainer::Tensor scratch_values(scratch_dim, true);
+  if (cached_freqs_cos == nullptr || cached_freqs_sin == nullptr) {
+    const std::lock_guard<std::mutex> lock(rope_init_mtx);
+    precompute_freqs(head_dim, attention_capacity, theta, false);
+    cached_freqs_cos = freqs_cos;
+    cached_freqs_sin = freqs_sin;
+  }
+  auto slice = [](nntrainer::Tensor &tensor, unsigned int offset,
+                  unsigned int rows) {
+    auto dim = tensor.getDim();
+    dim.height(rows);
+    return tensor.getSharedDataTensor(
+      dim, static_cast<size_t>(offset) * tensor.width(), true);
+  };
+
+  for (unsigned int offset = 0; offset < step;) {
+    const unsigned int seen = cache_index + offset;
+    // Match the authors' token-by-token evaluation: attend before eviction.
+    // Once full, every query sees capacity past tokens plus itself. Processing
+    // one row at a time keeps this behavior independent of prefill chunk size.
+    const unsigned int rows =
+      seen < capacity ? std::min(step - offset, capacity - seen) : 1u;
+    const unsigned int first = std::min(seen, capacity);
+    const unsigned int length = first + rows;
+    auto k = slice(key, offset, rows);
+    auto v = slice(value, offset, rows);
+    auto q = slice(query, offset, rows);
+    auto o = slice(output, offset, rows);
+
+    auto fp32_dim = k.getDim();
+    fp32_dim.setDataType(ml::train::TensorDim::DataType::FP32);
+    nntrainer::Tensor k_float(fp32_dim, true);
+    nntrainer::Tensor v_float(fp32_dim, true);
+    k_float.copyData(k);
+    v_float.copyData(v);
+    const auto *key_bits = cache_key.getData<uint16_t>();
+    auto *raw_data = raw_keys.getData<float>();
+    auto *value_bits = scratch_values.getData<uint16_t>();
+    const size_t start = static_cast<size_t>(first) * cache_key.width();
+    const size_t count = static_cast<size_t>(rows) * cache_key.width();
+    for (size_t i = 0; i < start; ++i)
+      raw_data[i] = nntrainer::compute_fp16_to_fp32(key_bits[i]);
+    std::memcpy(value_bits, cache_value.getData(), start * sizeof(uint16_t));
+    for (size_t i = 0; i < count; ++i) {
+      // Match the existing half-precision cache storage for incoming keys too.
+      raw_data[start + i] = nntrainer::compute_fp16_to_fp32(
+        nntrainer::compute_fp32_to_fp16(k_float.getData<float>()[i]));
+      value_bits[start + i] =
+        nntrainer::compute_fp32_to_fp16(v_float.getData<float>()[i]);
+    }
+    auto raw = slice(raw_keys, 0, length);
+    auto rotated = slice(rotated_keys, 0, length);
+    auto values = slice(scratch_values, 0, length);
+    apply_rotary_emb_tensor_v2(raw, rotated, head_dim, 0);
+
+    fp32_dim = q.getDim();
+    fp32_dim.setDataType(ml::train::TensorDim::DataType::FP32);
+    nntrainer::Tensor q_float(fp32_dim, true);
+    nntrainer::Tensor o_float(fp32_dim, true);
+    q_float.copyData(q);
+    apply_rotary_emb_tensor_v2(q_float, q_float, head_dim, first);
+    gemm_attention(q_float, rotated, values, o_float, length, rows, first);
+    o.copyData(o_float);
+
+    const unsigned int retained = streaming_llm.evict(
+      length, raw_data, static_cast<size_t>(cache_key.width()) * sizeof(float));
+    streaming_llm.evict(length, value_bits,
+                        static_cast<size_t>(cache_value.width()) *
+                          sizeof(uint16_t));
+    const size_t retained_elements =
+      static_cast<size_t>(retained) * cache_key.width();
+    auto *cache_bits = cache_key.getData<uint16_t>();
+    for (size_t i = 0; i < retained_elements; ++i)
+      cache_bits[i] = nntrainer::compute_fp32_to_fp16(raw_data[i]);
+    std::memcpy(cache_value.getData(), value_bits,
+                retained_elements * sizeof(uint16_t));
+    offset += rows;
+  }
+  cache_index += step;
+}
+
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
+  if (streaming_llm.enabled()) {
+    forwardingStreamingLLM(context, training);
+    return;
+  }
   if (!use_external_cache) {
     // 3/4-input (internal KV cache) mode: full-sequence self-attention.
     //
@@ -1490,6 +1627,8 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
 void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
                                           unsigned int _from, unsigned int _to,
                                           bool training) {
+  if (streaming_llm.enabled() && _to <= _from)
+    throw std::invalid_argument("StreamingLLM needs a non-empty forward step");
   // External KV cache path: from/to are interpreted as the absolute write
   // position; route through forwarding() which reads cache_key/cache_value
   // from input slots 3/4. forwarding() advances cache_index internally.
@@ -5639,7 +5778,9 @@ void MHACoreLayer::apply_rotary_emb_tensor_v2(nntrainer::Tensor &in,
                                               bool apply_rope) {
   unsigned int half_ = dim / 2;
   unsigned int max_timestep =
-    std::get<nntrainer::props::MaxTimestep>(mha_core_props).get();
+    streaming_llm.enabled()
+      ? streaming_llm.attentionCapacity()
+      : std::get<nntrainer::props::MaxTimestep>(mha_core_props).get();
 
   if (in.getDataType() == ml::train::TensorDim::DataType::FP32) {
     if (cached_freqs_cos == nullptr || cached_freqs_sin == nullptr) {
@@ -6166,6 +6307,12 @@ void MHACoreLayer::setProperty(const std::vector<std::string> &values) {
     if (nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE &&
         key == "cache_index") {
       setCacheIndex(static_cast<unsigned int>(std::stoul(parsed_value)));
+    } else if (key == "streaming_llm_sink_tokens") {
+      streaming_llm.sink_tokens =
+        StreamingLLMConfig::parseUnsigned(parsed_value);
+    } else if (key == "streaming_llm_recent_tokens") {
+      streaming_llm.recent_tokens =
+        StreamingLLMConfig::parseUnsigned(parsed_value);
     } else {
       props.push_back(value);
     }

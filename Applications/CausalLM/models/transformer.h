@@ -53,6 +53,7 @@
 #include "json.hpp"
 #include "kv_ring.h" // kvRingCap / effectivePrefillChunk (shared with mha_core)
 #include "performance_metrics.h"
+#include "streaming_llm.h"
 #include <fstream>
 #include <tokenizers_c.h>
 #include <tokenizers_cpp.h>
@@ -483,6 +484,8 @@ public:
    * every other layer keeps the full context window.
    */
   unsigned int getKVCacheRows(int layer_id) const {
+    if (streaming_llm.enabled())
+      return streaming_llm.capacity();
     // The layer side (mha_core::finalize) reaches the same verdict by feeding
     // the same two facts to the same predicate: usesAttentionSink() is the
     // model's answer to mha_core's `use_sink` property, and this cache IS the
@@ -719,6 +722,7 @@ protected:
   int NUM_HEADS;
   int NUM_KEY_VALUE_HEADS;
   int NUM_TO_GENERATE;
+  StreamingLLMConfig streaming_llm; /**< Optional attention-sink cache policy */
   std::string MODEL_TENSOR_TYPE;
   std::string EMBEDDING_DTYPE; /** embedding dtype */
   std::string FC_LAYER_DTYPE;  /** custom_fc_lora */
@@ -755,8 +759,8 @@ protected:
   float EMBEDDING_SCALE = 1.0f;
   int GQA_SIZE;
 
-  unsigned int BATCH_SIZE;              /**< Batch size for the model */
-  unsigned int INIT_SEQ_LEN;            /**< Initial sequence length */
+  unsigned int BATCH_SIZE;   /**< Batch size for the model */
+  unsigned int INIT_SEQ_LEN; /**< Initial sequence length */
   /** The height the PACK shipped, before any per-request growth. The floor of
    *  prefillPlaneFor(): a pack that ships a tall plane keeps it. */
   unsigned int PACK_INIT_SEQ_LEN = 0;
