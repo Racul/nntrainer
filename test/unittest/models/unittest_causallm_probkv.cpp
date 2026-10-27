@@ -8,12 +8,15 @@
  * @bug    No known bugs except for NYI items
  */
 
+#include <causallm_test_utils.h>
 #include <prob_kv.h>
+#include <qwen3_causallm.h>
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <numeric>
 #include <random>
@@ -979,4 +982,218 @@ TEST(ProbKVTest, MaeDiagnostic) {
       EXPECT_NEAR(got[1], got[0], 1e-7);
     }
   }
+}
+
+namespace {
+
+/**
+ * @brief Tiny Qwen3 CausalLM adapter (inference shared by CausalLMTestAdapter)
+ */
+using TinyQwen3CausalLM =
+  causallm_test::CausalLMTestAdapter<causallm::Qwen3CausalLM>;
+
+/** @brief A 14-token prompt of the tiny word-level tokenizer. */
+const char *kTinyPrompt =
+  "hello world tok3 tok4 tok5 tok6 tok7 tok8 tok9 tok10 tok11 tok12 tok13 "
+  "tok14";
+constexpr unsigned int kTinyPromptTokens = 14;
+
+/** @brief Capture std::clog for the lifetime of the object. */
+class ClogCapture {
+public:
+  ClogCapture() : old_(std::clog.rdbuf(text_.rdbuf())) {}
+  ~ClogCapture() { std::clog.rdbuf(old_); }
+  std::string str() const { return text_.str(); }
+
+private:
+  std::ostringstream text_;
+  std::streambuf *old_;
+};
+
+/**
+ * @brief Two-layer tiny Qwen3 (GQA 2) with random weights, a 14-token
+ * prompt and 6 generated tokens (EOS banned), run through CausalLM::run().
+ */
+std::string runTinyQwen3(const std::string &test_name,
+                         const causallm::json &extra_nntr,
+                         std::string *log = nullptr,
+                         TinyQwen3CausalLM **keep = nullptr) {
+  static std::vector<std::unique_ptr<TinyQwen3CausalLM>> alive;
+  const auto files = causallm_test::makeTinyCausalLMFiles(
+    "ProbKVModelTest", test_name, "Qwen3_FP32");
+  causallm::json cfg = {
+    {"architectures", {"Qwen3ForCausalLM"}},
+    {"bos_token_id", 0},
+    {"eos_token_id", {31}},
+    {"head_dim", 8},
+    {"hidden_size", 64},
+    {"intermediate_size", 64},
+    {"is_causal", true},
+    {"max_position_embeddings", 64},
+    {"model_type", "qwen3"},
+    {"num_attention_heads", 8},
+    {"num_hidden_layers", 2},
+    {"num_key_value_heads", 4},
+    {"rms_norm_eps", 1e-5},
+    {"rope_theta", 10000},
+    {"tie_word_embeddings", true},
+    {"vocab_size", 32},
+  };
+  auto nntr = causallm_test::makeTinyNntrainerConfig(
+    files.tokenizer_path, causallm_test::makeTinyFp32DataType());
+  nntr["init_seq_len"] = kTinyPromptTokens + 1;
+  nntr["max_seq_len"] = 32;
+  nntr["num_to_generate"] = 6;
+  nntr["bad_word_ids"] = std::vector<unsigned int>{31};
+  for (const auto &item : extra_nntr.items())
+    nntr[item.key()] = item.value();
+
+  auto generation = causallm_test::makeTinyGenerationConfig();
+  auto model = std::make_unique<TinyQwen3CausalLM>(cfg, generation, nntr);
+  model->initializeModel();
+  std::mt19937 rng(1234);
+  std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
+  model->forEachLayer([&](ml::train::Layer &layer,
+                          nntrainer::RunLayerContext &context, void *) {
+    for (unsigned int i = 0; i < context.getNumWeights(); ++i) {
+      auto &weight = context.getWeight(i);
+      if (weight.getDataType() != ml::train::TensorDim::DataType::FP32)
+        continue;
+      float *data = weight.getData<float>();
+      for (size_t k = 0; k < weight.size(); ++k)
+        data[k] =
+          causallm_test::isRmsNormLayerType(layer.getType()) ? 1.0f : dist(rng);
+    }
+  });
+  std::string text;
+  {
+    ClogCapture capture;
+    model->runPrompt(kTinyPrompt);
+    if (log)
+      *log = capture.str();
+  }
+  text = model->getOutputText(0);
+  if (keep) {
+    *keep = model.get();
+    alive.push_back(std::move(model));
+  }
+  return text;
+}
+
+/** @brief Values of "key=<n>" on log lines starting with prefix. */
+std::vector<std::string> logValues(const std::string &log,
+                                   const std::string &prefix,
+                                   const std::string &key) {
+  std::vector<std::string> out;
+  std::stringstream stream(log);
+  std::string line;
+  while (std::getline(stream, line)) {
+    if (line.rfind(prefix, 0) != 0)
+      continue;
+    const auto at = line.find(" " + key + "=");
+    if (at == std::string::npos)
+      continue;
+    const auto begin = at + key.size() + 2;
+    out.push_back(line.substr(begin, line.find(' ', begin) - begin));
+  }
+  return out;
+}
+
+} // namespace
+
+/**
+ * @brief ratio 0 (the keep control) runs the ProbKV path without eviction and
+ * generates exactly what the unchanged path does.
+ */
+TEST(ProbKVModelTest, RatioZeroMatchesBaseline) {
+  std::string log;
+  const auto base = runTinyQwen3("RatioZeroBase", causallm::json::object());
+  const auto keep =
+    runTinyQwen3("RatioZero", {{"probkv", {{"ratio", 0}}}}, &log);
+  EXPECT_FALSE(base.empty());
+  EXPECT_EQ(keep, base);
+  EXPECT_NE(log.find("[ProbKV] ratio=0 mode=sample"), std::string::npos);
+  EXPECT_EQ(logValues(log, "[ProbKV layer=1]", "rows"),
+            (std::vector<std::string>{std::to_string(kTinyPromptTokens)}));
+}
+
+/**
+ * @brief Every proposal, both scopes and top-k evict and keep generating.
+ */
+TEST(ProbKVModelTest, EvictsAndGenerates) {
+  for (const char *proposal : {"min", "min_h", "h2o", "h2o_h", "knorm", "tova",
+                               "snapkv", "streaming"}) {
+    for (const auto &extra :
+         {causallm::json{{"ratio", 0.5}, {"proposal", proposal}},
+          causallm::json{
+            {"ratio", 0.5}, {"proposal", proposal}, {"scope", "head"}},
+          causallm::json{
+            {"ratio", 0.5}, {"proposal", proposal}, {"mode", "topk"}}}) {
+      std::string log;
+      std::string text;
+      ASSERT_NO_THROW(text = runTinyQwen3(std::string("Evicts_") + proposal,
+                                          {{"probkv", extra}}, &log))
+        << extra.dump();
+      EXPECT_FALSE(text.empty()) << extra.dump();
+      const auto rows = logValues(log, "[ProbKV layer=1]", "rows");
+      ASSERT_EQ(rows.size(), 1u) << extra.dump() << "\n" << log;
+      EXPECT_LT(std::stoul(rows[0]), kTinyPromptTokens) << extra.dump();
+      if (!extra.contains("scope") && !extra.contains("mode")) {
+        EXPECT_EQ(logValues(log, "[ProbKV global]", "m").size(), 1u);
+      }
+    }
+  }
+}
+
+/**
+ * @brief The decode bias gives the same tokens on the flash (gemm) arm and
+ * on the per-row arm.
+ */
+TEST(ProbKVModelTest, BiasSameOnFlashAndPerRowArms) {
+  const auto base_flash =
+    runTinyQwen3("ArmsBaseFlash", {{"use_flash_attention", true}});
+  const auto base_row =
+    runTinyQwen3("ArmsBaseRow", {{"use_flash_attention", false}});
+  ASSERT_EQ(base_flash, base_row) << "the two arms already differ";
+  const causallm::json probkv = {{"ratio", 0.5}, {"proposal", "min_h"}};
+  const auto flash = runTinyQwen3(
+    "ArmsFlash", {{"probkv", probkv}, {"use_flash_attention", true}});
+  const auto row = runTinyQwen3(
+    "ArmsRow", {{"probkv", probkv}, {"use_flash_attention", false}});
+  EXPECT_EQ(flash, row);
+  // Eviction and the bias reach the output (the comparison is not vacuous).
+  EXPECT_NE(flash, base_flash);
+}
+
+/**
+ * @brief Global scope: one m for every layer, logged by the solve.
+ */
+TEST(ProbKVModelTest, GlobalScopeEvictsEveryLayer) {
+  std::string log;
+  runTinyQwen3("Global", {{"probkv", {{"ratio", 0.5}, {"proposal", "h2o"}}}},
+               &log);
+  const auto global = logValues(log, "[ProbKV global]", "m");
+  ASSERT_EQ(global.size(), 1u) << log;
+  for (const char *layer : {"[ProbKV layer=0]", "[ProbKV layer=1]"}) {
+    const auto m = logValues(log, layer, "m");
+    ASSERT_EQ(m.size(), 1u) << log;
+    EXPECT_EQ(m[0], global[0]);
+  }
+  const auto effective = logValues(log, "[ProbKV global]", "effective_r");
+  ASSERT_EQ(effective.size(), 1u);
+  EXPECT_NEAR(std::stod(effective[0]), 0.5, 0.25); // 4 heads x 14 rows
+}
+
+/**
+ * @brief Continued runs and serialized KV caches are rejected.
+ */
+TEST(ProbKVModelTest, RejectsUnsupportedRuns) {
+  TinyQwen3CausalLM *model = nullptr;
+  runTinyQwen3("Rejects", {{"probkv", {{"ratio", 0.5}}}}, nullptr, &model);
+  ASSERT_NE(model, nullptr);
+  EXPECT_THROW(model->runPrompt(kTinyPrompt), std::invalid_argument);
+  EXPECT_THROW(model->save_kvcache("/nonexistent/probkv.bin", 1),
+               std::invalid_argument);
+  causallm::json bad = {{"probkv", {{"ratio", 0.5}, {"tau", 0}}}};
+  EXPECT_THROW(runTinyQwen3("RejectsTau", bad), std::invalid_argument);
 }

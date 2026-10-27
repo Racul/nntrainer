@@ -28,6 +28,7 @@
 #include <engine.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -399,6 +400,27 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
     SAMPLING_SEED = causallm::kDefaultSamplingSeed;
   rng.seed(SAMPLING_SEED);
   global_token_len = 0;
+
+  // Optional ProbKV prompt eviction; omitting "probkv" keeps the existing path.
+  probkv_config_.clear();
+  probkv_describe_.clear();
+  if (nntr_cfg.contains("probkv")) {
+    const auto &settings = nntr_cfg.at("probkv");
+    if (!settings.is_object())
+      throw std::invalid_argument("probkv must be a JSON object");
+    causallm::ProbKVConfig config;
+    config.active = true;
+    for (const auto &item : settings.items())
+      config.set(item.key(), item.value().is_string()
+                               ? item.value().get<std::string>()
+                               : item.value().dump());
+    config.validate();
+    if (cfg.value("model_type", std::string()) != "qwen3" ||
+        nntr_cfg.value("model_tensor_type", std::string()) != "FP32-FP32")
+      throw std::invalid_argument("ProbKV currently supports Qwen3 FP32-FP32");
+    probkv_config_ = config.serialize();
+    probkv_describe_ = config.describe();
+  }
 }
 
 void CausalLM::allocateAndBindKVCache() {
@@ -947,6 +969,8 @@ std::string CausalLM::kvCacheModelTag() const {
 }
 
 void CausalLM::save_kvcache(std::string path, int to_) {
+  if (!probkv_config_.empty())
+    throw std::invalid_argument("ProbKV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     throw std::runtime_error(
       "save_kvcache called before allocateAndBindKVCache()");
@@ -991,6 +1015,8 @@ void CausalLM::setPrecomputedKVCache(const std::string &path,
 }
 
 void CausalLM::load_kvcache(std::string path, int to_) {
+  if (!probkv_config_.empty())
+    throw std::invalid_argument("ProbKV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1004,6 +1030,8 @@ void CausalLM::load_kvcache(std::string path, int to_) {
 
 unsigned int CausalLM::resumeFromKVCacheFile(const std::string &path,
                                              unsigned int token_len) {
+  if (!probkv_config_.empty())
+    throw std::invalid_argument("ProbKV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1349,6 +1377,14 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
                              "initialize() before run().");
   }
 
+  if (!probkv_config_.empty() &&
+      (BATCH_SIZE != 1 || SKIP_PREFILL || USE_KVCACHE ||
+       global_token_len != 0 || causallm_engine() != "cpu" ||
+       prefillDriveChunk() != 0))
+    throw std::invalid_argument(
+      "ProbKV requires a fresh batch-one CPU run without skipped, cached or "
+      "chunked prefill");
+
   struct StreamerEndGuard {
     BaseStreamer *streamer;
     ~StreamerEndGuard() { streamer_end(streamer); }
@@ -1519,6 +1555,50 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   _input.clear();
 
   unsigned int init_len = init_input.size();
+  if (!probkv_config_.empty()) {
+    if (!init_len)
+      throw std::invalid_argument("ProbKV requires a nonempty prompt");
+    // Every MHA layer gets the settings and its run identity; the last layer
+    // closes the global solve inside the prefill.
+    const std::string run = std::to_string(++probkv_runs_);
+    std::vector<bool> seen(static_cast<size_t>(NUM_LAYERS), false);
+    unsigned int layers = 0;
+    std::function<void(ml::train::Layer &, nntrainer::RunLayerContext &,
+                       void *)>
+      configure =
+        [&](ml::train::Layer &layer, nntrainer::RunLayerContext &, void *) {
+          if (layer.getType() != causallm::MHACoreLayer::type)
+            return;
+          const auto &name = layer.getName();
+          const auto end = name.find('_');
+          const auto index =
+            name.compare(0, 5, "layer") == 0 && end != std::string::npos
+              ? causallm::ProbKVConfig::parseUnsigned(name.substr(5, end - 5))
+              : seen.size();
+          if (index >= seen.size() || seen[index] ||
+              name != "layer" + std::to_string(index) + "_attention")
+            throw std::invalid_argument("Invalid ProbKV attention layer name " +
+                                        name);
+          layer.setProperty({"probkv=" + probkv_config_,
+                             "probkv_run=" + std::to_string(index) + "," +
+                               std::to_string(NUM_LAYERS) + "," +
+                               std::to_string(init_len) + "," + run});
+          seen[index] = true;
+          ++layers;
+        };
+    model->forEachLayer(configure, nullptr);
+    if (layers != static_cast<unsigned int>(NUM_LAYERS))
+      throw std::invalid_argument(
+        "ProbKV requires an MHA cache in every layer");
+    // Like an on-demand cache, hold no KV pages before the prefill: each layer
+    // faults in its prompt rows and releases what it evicts.
+    for (int i = 0; i < NUM_LAYERS; ++i) {
+      causallm::releaseRows(kv_cache.getKeyCache(i), 0);
+      causallm::releaseRows(kv_cache.getValueCache(i), 0);
+    }
+    std::clog << "[ProbKV] " << probkv_describe_ << " prompt=" << init_len
+              << std::endl;
+  }
   float *input_sample =
     (float *)malloc(sizeof(float) * BATCH_SIZE * MAX_SEQ_LEN);
   std::vector<bool> eos_list(BATCH_SIZE, false);

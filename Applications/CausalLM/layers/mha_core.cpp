@@ -1291,6 +1291,13 @@ void MHACoreLayer::ensure_rope_flat_lut() {
 }
 #endif
 
+// One ProbKV registry for every MHA layer of this library: the global-scope
+// solve needs all layers' proposals before any of them evicts (Eq. 34).
+static ProbKVRegistry &probkvRegistry() {
+  static ProbKVRegistry registry;
+  return registry;
+}
+
 /**
  * @note In external KV cache mode (use_external_cache == true), this
  *       implements the inference forward pass using cache tensors supplied
@@ -1313,6 +1320,19 @@ void MHACoreLayer::ensure_rope_flat_lut() {
  */
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
+  if (probkv_.enabled() &&
+      (training || !use_external_cache || !is_causal || use_sink ||
+       skip_prefill || local_window_size != UINT_MAX || kv_ring_cap ||
+       kv_int8 || is_kv_ohwi_enabled() || mha_device_attention_on() ||
+       attn_logit_softcapping != 0.0f ||
+       context.getInput(INOUT_INDEX::QUERY).batch() != 1 ||
+       context.getInput(INOUT_INDEX::QUERY).getDataType() !=
+         nntrainer::Tdatatype::FP32))
+    throw std::invalid_argument(
+      "ProbKV requires batch-one causal CPU inference with an external cache "
+      "and FP32 queries, without sinks, sliding windows, rings, int8 or OHWI "
+      "KV, softcapping or skipped prefill");
+
   if (!use_external_cache) {
     // 3/4-input (internal KV cache) mode: full-sequence self-attention.
     //
@@ -1375,6 +1395,8 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                              : (unsigned int)query.height();
   unsigned int from = cache_index;
   unsigned int to = cache_index + step_size;
+  probkv_.checkStep(from, step_size, cache_key.height(),
+                    max_position_embeddings);
 
   auto get_step_dim = [step_size](const ml::train::TensorDim &dim) {
     auto step_dim = dim;
@@ -1456,6 +1478,15 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                                          cache_value_dim, cache_value_step_dim);
       }
       output_step.copyData(O_step);
+      // Q_step now holds the rotated query (RoPE is applied in place).
+      if (probkv_.enabled() && from == 0)
+        probkv_.finishPrefill(Q_step, cache_key, cache_value,
+                              static_cast<unsigned int>(num_heads_Q),
+                              static_cast<unsigned int>(num_heads_KV),
+                              static_cast<unsigned int>(head_dim),
+                              probkvRegistry());
+      else if (probkv_.maeArmed())
+        probkv_.maeReport(Q_step, cache_key, cache_value);
 #else
       if (use_sink) {
         one_batch_incremental_forwarding(
@@ -1468,6 +1499,15 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
           cache_key, cache_value, cache_key_dim, cache_key_step_dim,
           cache_value_dim, cache_value_step_dim);
       }
+      // query_step now holds the rotated query (RoPE is applied in place).
+      if (probkv_.enabled() && from == 0)
+        probkv_.finishPrefill(query_step, cache_key, cache_value,
+                              static_cast<unsigned int>(num_heads_Q),
+                              static_cast<unsigned int>(num_heads_KV),
+                              static_cast<unsigned int>(head_dim),
+                              probkvRegistry());
+      else if (probkv_.maeArmed())
+        probkv_.maeReport(query_step, cache_key, cache_value);
 #endif
     } else {
       one_batch_incremental_forwarding(
@@ -1490,6 +1530,8 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
 void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
                                           unsigned int _from, unsigned int _to,
                                           bool training) {
+  if (probkv_.enabled() && (!use_external_cache || _to <= _from))
+    throw std::invalid_argument("ProbKV requires external KV cache steps");
   // External KV cache path: from/to are interpreted as the absolute write
   // position; route through forwarding() which reads cache_key/cache_value
   // from input slots 3/4. forwarding() advances cache_index internally.
@@ -3200,7 +3242,8 @@ void MHACoreLayer::one_batch_incremental_forwarding(
 
   /// @todo replace step_size into input height
   unsigned int step_size = to - from;
-  unsigned int cache_from = cache_index;
+  // Physical rows: identical to cache_index unless ProbKV compacted the prompt.
+  unsigned int cache_from = static_cast<unsigned int>(cacheRow(cache_index));
   unsigned int cache_to = cache_from + step_size;
 
   // NNTR_KVHASH: hash this layer's SVM K/V cache so two runs of
@@ -4459,6 +4502,16 @@ void MHACoreLayer::one_batch_incremental_forwarding(
 #endif
   compute_kcaches(query_step, b_cached_key, out_, cache_from,
                   cache_to - cache_from, num_heads_Q, gqa_size, head_dim);
+  // ProbKV: Alg. 1 as an additive logit bias on the surviving prompt rows
+  // (decode only: a compacted cache never takes another prefill).
+  if (probkv_.biasRows()) {
+    if (out_.getDataType() == ml::train::TensorDim::DataType::FP32)
+      probkv_.addBias(out_.getData<float>(), cache_to, num_heads_Q, gqa_size);
+#ifdef ENABLE_FP16
+    else
+      probkv_.addBias(out_.getData<_FP16>(), cache_to, num_heads_Q, gqa_size);
+#endif
+  }
 
   softmax_triangle(out_, step_size, num_heads_Q, cache_from);
 
@@ -4949,10 +5002,14 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
     }
   }
 
+  // ProbKV decode bias over the first pk_rows physical rows (0: none).
+  const unsigned int pk_rows = probkv_.biasRows();
+
   // Phase 2: flash attention over balanced (h_q, query-block) work units.
   tm.parallel_for(0, static_cast<size_t>(num_heads_Q) * num_qb, [&](size_t u) {
     const unsigned int h_q = static_cast<unsigned int>(u / num_qb);
     const unsigned int h_kv = h_q / gqa;
+    const float *pk_bias = pk_rows ? probkv_.bias(h_kv) : nullptr;
     const unsigned int qb = static_cast<unsigned int>(u % num_qb) * Bq;
     const unsigned int bq = std::min(Bq, N_q - qb);
     const float *Qp_fp32 = (q_fp16 && !q_fp16_to_fp32)
@@ -5013,6 +5070,8 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
 
 #if !defined(__x86_64__) && !defined(__i386__) && defined(__ARM_NEON)
       if (q_fp16) {
+        NNTR_THROW_IF(pk_bias != nullptr, std::invalid_argument)
+          << "ProbKV decode bias is not wired into the FP16-Q flash path";
         // ALL-FP16 PATH (matches pre-V-JEPA mha_core precision: FP16
         // storage with FP32 partial accumulation inside NEON kernels,
         // no upgrade to FP32 in the score buffer).
@@ -5154,6 +5213,13 @@ void MHACoreLayer::gemm_attention(nntrainer::Tensor &query_step,
                                               : (unsigned int)first_valid_ll);
             for (unsigned int k = 0; k < first_valid; ++k)
               s[k] = -INFINITY;
+          }
+
+          if (pk_bias && kb < pk_rows) {
+            // ProbKV: log w on kept prompt rows, -inf on padded ones.
+            const unsigned int end = std::min(bk, pk_rows - kb);
+            for (unsigned int k = 0; k < end; ++k)
+              s[k] += pk_bias[kb + k];
           }
 
           float bm = -3.0e38f;
@@ -6163,9 +6229,12 @@ void MHACoreLayer::setProperty(const std::vector<std::string> &values) {
   for (const auto &value : values) {
     std::string key;
     std::string parsed_value;
-    if (nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE &&
-        key == "cache_index") {
+    const bool parsed =
+      nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE;
+    if (parsed && key == "cache_index") {
       setCacheIndex(static_cast<unsigned int>(std::stoul(parsed_value)));
+    } else if (parsed && probkv_.consumeProperty(key, parsed_value)) {
+      continue;
     } else {
       props.push_back(value);
     }
