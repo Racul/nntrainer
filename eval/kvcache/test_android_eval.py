@@ -402,8 +402,9 @@ class AndroidCase(unittest.TestCase):
         return self.args("--condition", f"baseline={self.main}", "--condition", f"mykv={self.mykv}", *MYKV,
                          output=output)
 
-    def run_perf(self, args, adb=None):
-        return quiet(kv.evaluate_perf, args, ae.AndroidTarget(adb or self.adb))
+    def run_perf(self, args, adb=None, max_cool_wait=1800):
+        return quiet(kv.evaluate_perf, args, ae.AndroidTarget(adb or self.adb, max_cool_wait=max_cool_wait,
+                                                              cool_poll=0))
 
 
 class AndroidBuildCheck(AndroidCase):
@@ -568,6 +569,69 @@ class GenericConditions(AndroidCase):
         args = self.conditions()
         with self.assertRaisesRegex(RuntimeError, "Invalid trial function-512-baseline-00: baseline log matches"):
             self.run_perf(args)
+
+
+class TemperatureGate(unittest.TestCase):
+    """T9, T10: waiting for the target temperature."""
+
+    def wait(self, readings, max_wait=100):
+        now, sleeps, readings = [0.0], [], iter(readings)
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        result = ae.wait_for_temperature(lambda: next(readings), 36.5, max_wait, 10, sleep=sleep,
+                                         clock=lambda: now[0])
+        return result, sleeps
+
+    def test_waits_for_target(self):
+        self.assertEqual(self.wait([38.0, 37.2, 36.4]), ((36.4, 20.0), [10, 10]))
+        self.assertEqual(self.wait([36.5]), ((36.5, 0.0), []))
+
+    def test_stops(self):
+        with self.assertRaisesRegex(RuntimeError, r"stayed above 36\.5 °C \(40\.0 °C after 30 s\)"):
+            self.wait([40.0] * 10, max_wait=30)
+        with tempfile.TemporaryDirectory() as root:
+            for reading, message in (("abc", "not a number"), (200.0, "reads 200.0"), (0, "reads 0.0")):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    FakeAdb(root, temps=[reading]).temperature(0)
+
+
+class FirstTrialTarget(AndroidCase):
+    """T10, T11: the run's first trial sets the target; a resume keeps it."""
+
+    def test_target_kept_across_resume(self):
+        self.adb.interrupt_at = 2
+        args = self.standard()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_perf(args)
+        self.assertEqual(read_run(args.output)[0]["thermal"]["target_c"], 36.0)
+        self.adb.interrupt_at, self.adb.temps = None, [38.0, 37.0, 35.5]
+        self.run_perf(args)
+        manifest, records = read_run(args.output)
+        self.assertEqual((manifest["status"], manifest["thermal"]["target_c"]), ("COMPLETE", 36.0))
+        self.assertEqual(len(manifest["target_notes"]), 1)
+        self.assertEqual(records[2]["temp_start_c"], 35.5)
+        self.assertEqual([r["cool_wait_s"] for r in records[:2]], [0.0, 0.0])
+        summary = (args.output / "summary.md").read_text()
+        self.assertIn("Target temperature 36.0 °C (thermal_zone0), set by the first trial at ", summary)
+        self.assertIn("|512|cool_wait_s|", summary)
+
+    def test_gate_timeout_leaves_no_record(self):
+        self.adb.interrupt_at = 1
+        args = self.standard()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_perf(args)
+        self.adb.interrupt_at, self.adb.temps = None, [45.0]
+        self.adb.killed.clear()
+        with self.assertRaisesRegex(RuntimeError, r"stayed above 36\.0 °C"):
+            self.run_perf(args, max_cool_wait=0)
+        manifest, records = read_run(args.output)
+        self.assertEqual((manifest["status"], len(records), self.adb.killed), ("FAILED", 1, []))
+        self.adb.temps = [36.0]
+        self.run_perf(args)
+        self.assertEqual(read_run(args.output)[0]["status"], "COMPLETE")
 
 
 if __name__ == "__main__":

@@ -146,6 +146,81 @@ A prediction passes the same output checks as a performance trial. A complete ru
 
 `--max-input 8192` reproduces the pyramidkv branch's cases. With the Qwen3-0.6B `tokenizer.json` (sha256 `aeb13307…`), that file has sha256 `f54431f60ca437750b32efc1c2b2cf7e32a0a28eee34e7d16c01ca01b68a0495`.
 
+## Android (`android_eval.py`)
+
+`android_eval.py` runs the same `perf` trials on an Android device over adb.
+It only changes where a trial runs. Conditions, settings, activation checks,
+validation, resume and `report` are those described above, so every method is
+measured the same way: build its branch, stage the outputs, run `perf`.
+
+```bash
+export ANDROID_NDK=$PWD/builddir/tools/android-ndk-r26d
+ADB=/mnt/c/Users/<user>/AppData/Local/Android/Sdk/platform-tools/adb.exe   # Windows adb from WSL
+
+git switch X                                    # the method branch
+taskset -c 0-3 ./Applications/CausalLM/build_android.sh
+git switch eval
+python3 eval/kvcache/android_eval.py stage X --revision X   # right after the build
+
+python3 eval/kvcache/android_eval.py check --adb "$ADB"
+timeout -s TERM 560 python3 eval/kvcache/android_eval.py perf --adb "$ADB" \
+  --model models/qwen3-fp32-main \
+  --official data/longbench/official-src/LongBench --data data/longbench/extracted/data \
+  --condition baseline=build-android/main/nntr_causallm \
+  --condition x-r50=build-android/X/nntr_causallm \
+  --setting 'x-r50={"x": {"ratio": 0.5}}' --expect 'x-r50=^\[X\] ratio=0\.5' \
+  --output logs/kvcache/x-android-<date>
+```
+
+Build:
+- `build_android.sh` starts `nproc` compile jobs. `taskset -c 0-3` limits it to four cores. Run one build at a time.
+- `--cache` reuses the engine (`libnntrainer.so`) whenever its build options match, even if engine sources changed. Do not use it for the first build of a checkout, or for a method that changes `nntrainer/` itself.
+
+`stage NAME --revision REV`:
+- Copies the build outputs to the ignored `build-android/NAME/`:
+  - `nntr_causallm`, `libcausallm.so` and `libquick_dot_ai_api.so` from `builddir_app/cpu`;
+  - `libnntrainer.so` and `libccapi-nntrainer.so` from `builddir/android_build_result/lib/arm64-v8a`;
+  - `libc++_shared.so` from the NDK (`--ndk`, default `$ANDROID_NDK`).
+- Writes `build-info.json`: revision, engine and app Meson options, compilers, NDK revision, output times and sha256.
+- The outputs carry no git information, so stage right after building.
+- `build_android.sh` keeps only its last build. Stage main once; every method reuses it.
+
+`perf`:
+- Takes every `kvcache_eval.py perf` option except `--cpus`.
+- Adds `--adb`, `--serial`, `--device-dir` (default `/data/local/tmp/kvcache-eval`), `--thermal-zone` (default 0), `--max-cool-wait` (default 1,800 s) and `--cool-poll` (default 10 s).
+- The default is 1 latency and 1 memory trial per input and condition, plus the function checks.
+- `--revision` defaults to each stage's revision. A revision you give must name the same commit.
+- `--check` validates the device, the stages and the deployment without inference.
+- Builds must be CPU-only Android builds. Engine options, compilers and NDK are compared as on Linux.
+
+Device layout:
+
+```text
+<device-dir>/bin/<id>/      one bundle per staged build; id from its six file hashes
+<device-dir>/models/<id>/   the model files named in nntr_config.json; id from their hashes
+<device-dir>/trial/         config.json, generation_config.json, nntr_config.json of the current trial
+<device-dir>/mem_usage.sh   the original script; sha256 checked
+```
+
+Only files missing or different on the device are pushed, and every push is verified. Old bundles are not removed automatically.
+
+A trial:
+- runs `<bin>/nntr_causallm <trial>` with `LD_LIBRARY_PATH=<bin>`, NNTR/OMP four threads, OpenBLAS one thread and `NNTR_ENGINE=cpu`. The CPU is not pinned;
+- runs under `sh mem_usage.sh` for a memory trial;
+- reads model paths that point to the device copies;
+- validates adb.exe's CRLF output as LF. The raw logs keep it as written.
+
+Temperature:
+- The run's first trial stores the `thermal_zone` temperature as the target. It goes to `thermal` in `manifest.json` and is noted in `summary.md`.
+- Every later trial starts only when the zone is at or below the target. This also holds after a resume. The temperature is read every `--cool-poll` seconds.
+- After `--max-cool-wait`, the run stops without writing a record. Resume it later; the target stays the same.
+- Each trial records `temp_start_c`, `temp_end_c`, `cool_wait_s` and the battery temperature, level and USB power. `summary.md` averages them per input and condition.
+
+Run long measurements in the foreground as `timeout -s TERM 560` chunks:
+- SIGTERM also stops the running trial on the device (`pkill -f <bin>/nntr_causallm`), and the next call resumes.
+- The protocol holds the device identity (model, SoC, fingerprint, serial), the thermal zone, the device folder, and the bundle and model hashes.
+- Battery, device memory, stage times and the host environment change between calls. They are kept per call under `target_state` in the manifest, so they do not block a resume.
+
 ## Runs and outputs
 
 An existing `--output` directory is resumed only when the whole protocol is unchanged: inputs, selection, settings, executables, libraries, model assets, compiler and scorer. An invalid record stops a run and must be inspected first. `report DIR` rewrites `summary.md` of either kind of run.
@@ -163,4 +238,5 @@ An existing `--output` directory is resumed only when the whole protocol is unch
 - Any set of conditions and methods; settings and activation checks come from the command line, with presets for the existing branches.
 - Latency/memory and quality live in one script with shared validation.
 - Warning patterns are searched outside the echoed prompt and prediction.
-- `--reuse-from` and the legacy Windows parser recovery are not carried over. `perf` is Linux only.
+- `--reuse-from` and the legacy Windows parser recovery are not carried over. `kvcache_eval.py perf` is Linux only;
+  `android_eval.py` runs it on Android.

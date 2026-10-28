@@ -8,7 +8,8 @@ kvcache_eval.py; this file only adds an Android target for its trial loop.
 
   stage  copy the current build_android.sh outputs to build-android/NAME
   check  print the device state; no inference
-  perf   latency and memory trials (default 1 + 1 per input and condition)
+  perf   latency and memory trials (default 1 + 1 per input and condition);
+         each trial waits until the device is as cool as at the first trial
 
 kvcache_eval.py report DIR rewrites the summary of an Android run as well.
 """
@@ -23,6 +24,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 
 import kvcache_eval as kv
 
@@ -43,7 +45,7 @@ DEVICE_DIR = "/data/local/tmp/kvcache-eval"
 REMOTE_DIR = re.compile(r"(?:/[A-Za-z0-9_.-]+)+")
 # Room left free on the device beyond the files to push (tokenizer cache, logs).
 FREE_MARGIN_KIB = 64 * 1024
-TRIAL_COLUMNS = ["temp_start_c", "temp_end_c", "battery_temp_c", "battery_level", "usb_powered"]
+TRIAL_COLUMNS = ["temp_start_c", "temp_end_c", "cool_wait_s", "battery_temp_c", "battery_level", "usb_powered"]
 
 
 class AndroidDevice:
@@ -249,6 +251,22 @@ def fill_revisions(args):
     args.revision = revisions
 
 
+def wait_for_temperature(read, target, max_wait, poll, sleep=time.sleep, clock=time.monotonic, report=None):
+    """Poll read() until it is at or below target; return (temperature, seconds waited)."""
+    start = clock()
+    temperature = read()
+    while temperature > target:
+        waited = clock() - start
+        if waited >= max_wait:
+            raise RuntimeError(f"The device stayed above {target:.1f} °C ({temperature:.1f} °C after {waited:.0f} s); "
+                               "let it cool and resume the run")
+        if report:
+            report(temperature, waited)
+        sleep(poll)
+        temperature = read()
+    return temperature, clock() - start
+
+
 def remote_command(bin_dir, trial_dir, memory, script):
     """Shell command of one trial. The executable runs by absolute path, so
     pkill -f finds exactly it; exec keeps the echoed PID for the model (or for
@@ -287,8 +305,9 @@ class AndroidTarget:
     """
     kind = "android"
 
-    def __init__(self, device, device_dir=DEVICE_DIR, zone=0):
+    def __init__(self, device, device_dir=DEVICE_DIR, zone=0, max_cool_wait=1800, cool_poll=10):
         self.device, self.dir, self.zone = device, device_dir, zone
+        self.max_cool_wait, self.cool_poll = max_cool_wait, cool_poll
         self.stages, self.missing = {}, []
 
     def check(self, kind):
@@ -329,8 +348,10 @@ class AndroidTarget:
                      for label, stage in self.stages.items()},
             model_files=dict(id=content_id(models), files=models),
             extra_columns=TRIAL_COLUMNS,
-            environment_note=(f"Android device {self.info['model']} ({self.info['soc']}), CPU not pinned; the "
-                              f"temperature of thermal_zone{self.zone} and the battery are recorded per trial."),
+            environment_note=(f"Android device {self.info['model']} ({self.info['soc']}), CPU not pinned. Each trial "
+                              f"starts only when thermal_zone{self.zone} is at or below its temperature at the start "
+                              "of the run's first trial; temperatures, cooling wait and battery are recorded per "
+                              "trial."),
             android_script_sha256=kv.sha(Path(__file__)))
         _, _, files = device_layout(dict(protocol, **described), self.dir)
         present = self.device.sha256(list(files))
@@ -357,6 +378,7 @@ class AndroidSession:
 
     def __init__(self, target, protocol):
         self.device, self.zone, self.missing = target.device, target.zone, target.missing
+        self.max_cool_wait, self.cool_poll = target.max_cool_wait, target.cool_poll
         self.bins, self.assets, self.files = device_layout(protocol, target.dir)
         self.trial, self.script = f"{target.dir}/trial", f"{target.dir}/mem_usage.sh"
         self.active = None
@@ -395,7 +417,31 @@ class AndroidSession:
         self.device.push(local, f"{self.trial}/{name}")
 
     def before_trial(self, manifest):
-        return dict(temp_start_c=self.device.temperature(self.zone), **self.device.battery())
+        """The run's first trial sets the target temperature (kept in the
+        manifest across resumes); every later trial waits for it."""
+        def read():
+            return self.device.temperature(self.zone)
+
+        reported = []
+
+        def report(temperature, waited):
+            # About once a minute while cooling.
+            if not reported or waited - reported[-1] >= 60:
+                reported.append(waited)
+                print(f"COOL thermal_zone{self.zone} {temperature:.1f} °C > {target:.1f} °C, "
+                      f"waited {waited:.0f} s", flush=True)
+
+        if "thermal" not in manifest:
+            temperature, waited = read(), 0.0
+            manifest["thermal"] = dict(zone=self.zone, target_c=temperature, set_at=kv.now())
+            manifest.setdefault("target_notes", []).append(
+                f"Target temperature {temperature:.1f} °C (thermal_zone{self.zone}), set by the first trial at "
+                f"{manifest['thermal']['set_at']}.")
+        else:
+            target = manifest["thermal"]["target_c"]
+            temperature, waited = wait_for_temperature(read, target, self.max_cool_wait, self.cool_poll,
+                                                       report=report)
+        return dict(temp_start_c=temperature, cool_wait_s=round(waited, 1), **self.device.battery())
 
     def run(self, label, memory, stdout_path, stderr_path):
         self.active = f"{self.bins[label]}/nntr_causallm"
@@ -452,6 +498,10 @@ def build_parser():
 
     perf = commands.add_parser("perf", parents=[*kv.perf_parser_parents(), device],
                                help="latency and memory trials on the device")
+    perf.add_argument("--max-cool-wait", type=float, default=1800,
+                      help="seconds a trial may wait for the target temperature before the run stops (default 1800)")
+    perf.add_argument("--cool-poll", type=float, default=10,
+                      help="seconds between temperature readings while waiting (default 10)")
     perf.set_defaults(repeat=1)
     return parser
 
@@ -462,6 +512,8 @@ def main():
     if args.command != "stage" and (not REMOTE_DIR.fullmatch(args.device_dir)
                                     or ".." in args.device_dir.split("/")):
         parser.error("--device-dir must be an absolute path of [A-Za-z0-9_.-] names without ..")
+    if args.command == "perf" and (args.max_cool_wait < 0 or args.cool_poll <= 0):
+        parser.error("--max-cool-wait must be nonnegative and --cool-poll positive")
     if args.command == "stage":
         if args.ndk is None:
             parser.error("stage needs --ndk or ANDROID_NDK")
@@ -474,7 +526,7 @@ def main():
         kv.check_perf_args(parser, args)
         fill_revisions(args)
         kv.evaluate_perf(args, AndroidTarget(AndroidDevice(args.adb, args.serial), args.device_dir,
-                                             args.thermal_zone))
+                                             args.thermal_zone, args.max_cool_wait, args.cool_poll))
 
 
 if __name__ == "__main__":
