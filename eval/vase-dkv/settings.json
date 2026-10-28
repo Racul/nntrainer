@@ -1,0 +1,10 @@
+{
+  "skip_prefill": false,
+  "vase_dkv": {
+    "enabled": true,
+    "budget": 1024,
+    "buffer": 64,
+    "rank": 20,
+    "seed": 42
+  }
+}

@@ -1311,8 +1311,96 @@ void MHACoreLayer::ensure_rope_flat_lut() {
  *         input[3] = cache_key   (B, 1, max_seq_len, num_heads_KV * head_dim)
  *         input[4] = cache_value (B, 1, max_seq_len, num_heads_KV * head_dim)
  */
+
+void MHACoreLayer::forwardCompactKV(nntrainer::RunLayerContext &context,
+                                    unsigned int step, bool training) {
+  auto &state = compact_kv_.cache;
+  const auto max_step =
+    std::get<nntrainer::props::MaxTimestep>(mha_core_props).get();
+  const auto max_new = std::get<props::MaxNewTokens>(mha_core_props).get();
+  if (training || !use_external_cache || kv_int8 || use_sink || !is_causal ||
+      local_window_size != UINT_MAX || kv_ring_cap || skip_prefill ||
+      std::get<props::AttnLogitSoftcapping>(mha_core_props).get() != 0 ||
+      nntr_engine_env() != "cpu")
+    throw std::invalid_argument(
+      "Compressed KV requires CPU full causal attention");
+  state.checkStep(cache_index, step,
+                  std::min(max_step, max_position_embeddings));
+  auto &query = context.getInput(0);
+  auto &key = context.getInput(1);
+  auto &value = context.getInput(2);
+  auto &output = context.getOutput(0);
+  for (const auto *t : {&query, &key, &value, &output})
+    if (t->batch() != 1 || t->channel() != 1 || t->height() < step ||
+        t->getFormat() != ml::train::TensorDim::Format::NCHW ||
+        t->getDataType() != ml::train::TensorDim::DataType::FP32)
+      throw std::invalid_argument(
+        "Compressed KV requires batch-one FP32 NCHW Q/K/V/O");
+  if (!num_heads_KV || !num_heads_Q || num_heads_Q % num_heads_KV ||
+      !head_dim || query.width() != num_heads_Q * head_dim ||
+      output.width() != query.width() ||
+      key.width() != num_heads_KV * head_dim || value.width() != key.width())
+    throw std::invalid_argument("Compressed KV has invalid attention geometry");
+  if (!cache_index) {
+    if (!max_new || max_new > max_step - step)
+      throw std::invalid_argument(
+        "Compressed KV requires a bounded generation reserve");
+    state.allocate(step, num_heads_KV * head_dim);
+  } else if (state.live >= state.key.height()) {
+    throw std::out_of_range("Compressed KV physical cache is full");
+  }
+  auto view = [step](nntrainer::Tensor &t) {
+    auto dim = t.getDim();
+    dim.height(step);
+    return t.getSharedDataTensor(dim, 0, true);
+  };
+  auto q = view(query), k = view(key), v = view(value), o = view(output);
+  if (!cache_index) {
+    // Original full causal prefill, completed before any K/V is evicted.
+    auto kd = state.key.getDim(), vd = state.value.getDim();
+    auto ks = kd, vs = vd;
+    ks.height(step);
+    vs.height(step);
+    one_batch_incremental_forwarding(0, 0, 0, step, q, k, v, o, state.key,
+                                     state.value, kd, ks, vd, vs);
+  } else {
+    // Short-lived aliases must die before afterAttention replaces storage.
+    auto dim = state.key.getDim();
+    dim.height(1);
+    auto ks = state.key.getSharedDataTensor(
+      dim, static_cast<size_t>(state.live) * state.key.width(), true);
+    auto vs = state.value.getSharedDataTensor(
+      dim, static_cast<size_t>(state.live) * state.value.width(), true);
+    apply_rotary_emb_tensor_v2(q, q, head_dim, cache_index, theta > 0);
+    apply_rotary_emb_tensor_v2(k, ks, head_dim, cache_index, theta > 0);
+    apply_rotary_emb_tensor_v2(v, vs, head_dim, cache_index, false);
+    dim.height(state.live + 1);
+    auto kc = state.key.getSharedDataTensor(dim, 0, true);
+    auto vc = state.value.getSharedDataTensor(dim, 0, true);
+    nntrainer::Tensor probabilities(1, 1, state.live + 1, num_heads_Q,
+                                    q.getTensorType());
+    const auto group = num_heads_Q / num_heads_KV;
+    compute_kcaches(q, kc, probabilities, state.live, 1, num_heads_Q, group,
+                    head_dim);
+    softmax_triangle(probabilities, 1, num_heads_Q, state.live);
+    compute_fp16vcache_transposed(probabilities, vc, o, state.live,
+                                  num_heads_KV, group, head_dim,
+                                  state.live + 1);
+  }
+  compact_kv_.afterAttention(q, num_heads_Q, num_heads_KV, head_dim, step,
+                             max_new);
+  cache_index += step;
+}
+
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
+  if (compact_kv_.enabled()) {
+    forwardCompactKV(context,
+                     incremental_step_size ? incremental_step_size
+                                           : context.getInput(0).height(),
+                     training);
+    return;
+  }
   if (!use_external_cache) {
     // 3/4-input (internal KV cache) mode: full-sequence self-attention.
     //
@@ -1490,6 +1578,8 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
 void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
                                           unsigned int _from, unsigned int _to,
                                           bool training) {
+  if (compact_kv_.enabled() && _to <= _from)
+    throw std::invalid_argument("Compressed KV requires a positive step");
   // External KV cache path: from/to are interpreted as the absolute write
   // position; route through forwarding() which reads cache_key/cache_value
   // from input slots 3/4. forwarding() advances cache_index internally.
@@ -6166,6 +6256,8 @@ void MHACoreLayer::setProperty(const std::vector<std::string> &values) {
     if (nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE &&
         key == "cache_index") {
       setCacheIndex(static_cast<unsigned int>(std::stoul(parsed_value)));
+    } else if (compact_kv_.consumeProperty(key, parsed_value)) {
+      // Method state is owned by this layer, not process-global.
     } else {
       props.push_back(value);
     }
