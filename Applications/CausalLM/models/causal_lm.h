@@ -86,6 +86,13 @@ public:
   static void releaseDeviceCaches();
 
 protected:
+  /** @brief One-shot ManifoldKV prompt compression and compact-cache decoding.
+   */
+  void runManifoldKV(const WSTR &prompt, bool do_sample,
+                     const WSTR &system_prompt, const WSTR &tail_prompt,
+                     bool log_output);
+  unsigned int manifold_prompt_length =
+    0; /**< Current uncompressed prompt length */
   /**
    * @brief One-shot CUDA prewarm guard, PER MODEL OBJECT. A function-local
    *        static was process-lifetime, so the second load of a load/destroy
@@ -156,7 +163,8 @@ public:
   void resetLogitsProcessor() override;
 
   /**
-   * @brief Current KV-cache write position (absolute token position)
+   * @brief Current retained KV-cache length. Use getSessionTokenPosition()
+   * for the original logical token position with ManifoldKV.
    */
   int getKvLen() const override {
     return static_cast<int>(kv_cache.getPosition());

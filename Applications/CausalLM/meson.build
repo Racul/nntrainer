@@ -453,6 +453,19 @@ if get_option('enable-test')
     suite: 'unittests'
   )
 
+  unittest_manifold_kv = executable(
+    'unittest_manifold_kv',
+    meson.current_source_dir() / 'layers' / 'unittest_manifold_kv.cpp',
+    dependencies: [nntrainer_dep, nntrainer_ccapi_dep, gtest_main_dep, causallm_mha_core_dep],
+    include_directories: causallm_layer_inc,
+    build_by_default: true,
+    install: false,
+  )
+  test('unittest_manifold_kv', unittest_manifold_kv,
+    timeout: 60,
+    suite: 'unittests'
+  )
+
   # KV window-ring rule (kv_ring.h): host-only, no GPU needed. Pins the
   # capacity formula and the row wrap that the model-side allocation and the
   # layer-side modulo map must both obey.
@@ -550,6 +563,24 @@ if get_option('enable-test')
   # Ubuntu native builds use platform=none.
   model_unittest_platforms = ['none', 'windows', 'android']
   platform = get_option('platform')
+  if platform in model_unittest_platforms
+    unittest_manifold_kv_models = executable(
+      'unittest_manifold_kv_models',
+      [
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'causallm_test_utils.cpp',
+        meson.source_root() / 'test' / 'unittest' / 'models' / 'unittest_causallm_manifold_kv.cpp',
+      ],
+      dependencies: [nntrainer_dep, nntrainer_ccapi_dep, gtest_main_dep,
+                     causallm_layer_dependencies, causallm_dep],
+      include_directories: causallm_inc + [causallm_unittest_inc],
+      build_by_default: true,
+      install: false,
+    )
+    test('unittest_manifold_kv_models', unittest_manifold_kv_models,
+      timeout: 60,
+      suite: 'unittests'
+    )
+  endif
   # Tiny model-level tests cover FP32 and Q4_0-FP32 correctness. Keep them out
   # of FP16 builds, where cache tensors intentionally use FP16 storage.
   enable_causallm_model_unittest = (

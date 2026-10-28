@@ -89,7 +89,7 @@ void clLaunchStatDump(const char *phase);
 #include <cuda_context_manager.h>
 #include <cuda_elementwise.h>
 #include <cuda_emb_gather.h> // [reload] gather LUT teardown
-#include <cuda_fc_qs4cx.h> // [lmhead-tie-lut] tied-head LUT registration
+#include <cuda_fc_qs4cx.h>   // [lmhead-tie-lut] tied-head LUT registration
 #include <cuda_runtime.h>
 #include <cuda_stream_manager.h>
 #endif
@@ -293,10 +293,6 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
   for (unsigned int i = 0; i < BATCH_SIZE; ++i)
     output_list.push_back("");
 
-  // allocate memory for the internal buffer
-  ids_history = (unsigned int *)malloc(static_cast<size_t>(BATCH_SIZE) *
-                                       MAX_SEQ_LEN * sizeof(unsigned int));
-
   BAD_WORD_IDS = nntr_cfg["bad_word_ids"].get<std::vector<unsigned int>>();
   NUM_BADWORDS = BAD_WORD_IDS.size();
 
@@ -399,6 +395,19 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
     SAMPLING_SEED = causallm::kDefaultSamplingSeed;
   rng.seed(SAMPLING_SEED);
   global_token_len = 0;
+  if (manifold_kv.enabled() &&
+      (BATCH_SIZE != 1 || SKIP_PREFILL || USE_KVCACHE || MEMORY_SWAP ||
+       !IS_CAUSAL || SLIDING_WINDOW != UINT_MAX || causallm_engine() != "cpu" ||
+       std::getenv("NNTR_KV_INT8") != nullptr))
+    throw std::invalid_argument(
+      "ManifoldKV supports batch-one Qwen3 CPU inference without saved/"
+      "skipped prefill, FSU, sliding windows or int8 KV");
+  // Allocate only after configuration validation, so construction failures
+  // cannot leave the history buffer without an owning object.
+  ids_history = (unsigned int *)malloc(static_cast<size_t>(BATCH_SIZE) *
+                                       MAX_SEQ_LEN * sizeof(unsigned int));
+  if (!ids_history)
+    throw std::bad_alloc();
 }
 
 void CausalLM::allocateAndBindKVCache() {
@@ -798,8 +807,14 @@ std::vector<float *> CausalLM::incrementalInference(
   // mha_core advances only its own internal cache_index during forwarding,
   // so without this getKvLen()/save_kvcache() would report the stale
   // prefill-start position (advanceKVCachePosition had no caller).
-  if (kv_cache.isAllocated() && to <= kv_cache.getMaxSeqLen())
-    kv_cache.setPosition(to);
+  if (kv_cache.isAllocated()) {
+    if (manifold_kv.enabled())
+      kv_cache.setPosition(
+        to - (manifold_prompt_length -
+              std::min(manifold_prompt_length, manifold_kv.budget)));
+    else if (to <= kv_cache.getMaxSeqLen())
+      kv_cache.setPosition(to);
+  }
 
   return output;
 }
@@ -947,6 +962,9 @@ std::string CausalLM::kvCacheModelTag() const {
 }
 
 void CausalLM::save_kvcache(std::string path, int to_) {
+  if (manifold_kv.enabled())
+    throw std::invalid_argument(
+      "ManifoldKV cache serialization is unsupported");
   if (!kv_cache.isAllocated()) {
     throw std::runtime_error(
       "save_kvcache called before allocateAndBindKVCache()");
@@ -974,15 +992,27 @@ static inline void retire_decode_capture() {
 }
 
 void CausalLM::setSessionTokenPosition(unsigned int pos) {
+  if (manifold_kv.enabled() && pos != 0 && pos != global_token_len)
+    throw std::invalid_argument(
+      "ManifoldKV cannot reposition a compressed cache");
   USE_KVCACHE = false;
   PRE_COMPUTED_CACHE_PATH.clear();
   SYS_PROMP_LEN = 0;
   global_token_len = pos;
+  if (manifold_kv.enabled() && pos == 0)
+    kv_cache.reset();
   retire_decode_capture();
 }
 
 void CausalLM::setPrecomputedKVCache(const std::string &path,
                                      unsigned int sys_prompt_token_len) {
+  if (manifold_kv.enabled()) {
+    if (!path.empty())
+      throw std::invalid_argument(
+        "ManifoldKV cache serialization is unsupported");
+    setSessionTokenPosition(0);
+    return;
+  }
   USE_KVCACHE = !path.empty();
   PRE_COMPUTED_CACHE_PATH = path;
   SYS_PROMP_LEN = USE_KVCACHE ? sys_prompt_token_len : 0;
@@ -991,6 +1021,9 @@ void CausalLM::setPrecomputedKVCache(const std::string &path,
 }
 
 void CausalLM::load_kvcache(std::string path, int to_) {
+  if (manifold_kv.enabled())
+    throw std::invalid_argument(
+      "ManifoldKV cache serialization is unsupported");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1004,6 +1037,9 @@ void CausalLM::load_kvcache(std::string path, int to_) {
 
 unsigned int CausalLM::resumeFromKVCacheFile(const std::string &path,
                                              unsigned int token_len) {
+  if (manifold_kv.enabled())
+    throw std::invalid_argument(
+      "ManifoldKV cache serialization is unsupported");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1347,6 +1383,11 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   if (!is_initialized) {
     throw std::runtime_error("CausalLM model is not initialized. Please call "
                              "initialize() before run().");
+  }
+
+  if (manifold_kv.enabled()) {
+    runManifoldKV(prompt, do_sample, system_prompt, tail_prompt, log_output);
+    return;
   }
 
   struct StreamerEndGuard {

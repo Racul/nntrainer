@@ -1311,8 +1311,104 @@ void MHACoreLayer::ensure_rope_flat_lut() {
  *         input[3] = cache_key   (B, 1, max_seq_len, num_heads_KV * head_dim)
  *         input[4] = cache_value (B, 1, max_seq_len, num_heads_KV * head_dim)
  */
+void MHACoreLayer::forwardingManifoldKV(nntrainer::RunLayerContext &context,
+                                        bool training) {
+  auto &query = context.getInput(INOUT_INDEX::QUERY);
+  if (training || !use_external_cache || !is_causal || use_sink ||
+      skip_prefill || local_window_size != UINT_MAX || kv_ring_cap || kv_int8 ||
+      (!nntr_engine_env().empty() && nntr_engine_env() != "cpu"))
+    throw std::invalid_argument(
+      "ManifoldKV requires CPU causal inference with external cache");
+  auto &key = context.getInput(INOUT_INDEX::KEY);
+  auto &value = context.getInput(INOUT_INDEX::VALUE);
+  auto &output = context.getOutput(INOUT_INDEX::OUTPUT);
+  auto &cache_key = context.getInput(3);
+  auto &cache_value = context.getInput(4);
+  const unsigned int step =
+    incremental_step_size ? incremental_step_size : query.height();
+  const auto host_tensor = [](const nntrainer::Tensor &tensor) {
+    const auto memory = tensor.getMemoryData();
+    return !tensor.isClMem() && (!memory || !memory->isSVM());
+  };
+  for (const auto *tensor :
+       {&query, &key, &value, &output, &cache_key, &cache_value})
+    if (!host_tensor(*tensor) || tensor->batch() != 1 || tensor->channel() != 1)
+      throw std::invalid_argument("ManifoldKV requires batch-one host tensors");
+  if (!step || step > query.height() || step > key.height() ||
+      step > value.height() || step > output.height() ||
+      query.width() != num_heads_Q * head_dim ||
+      output.width() != query.width() ||
+      key.width() != num_heads_KV * head_dim || value.width() != key.width() ||
+      cache_key.width() != key.width() ||
+      cache_key.getDim() != cache_value.getDim() ||
+      (cache_key.getDataType() != ml::train::TensorDim::DataType::UINT16 &&
+       cache_key.getDataType() != ml::train::TensorDim::DataType::FP16))
+    throw std::invalid_argument("Invalid ManifoldKV step or cache geometry");
+  manifold_kv.checkStep(
+    cache_index, step, cache_key.height(),
+    std::min(max_position_embeddings,
+             std::get<nntrainer::props::MaxTimestep>(mha_core_props).get()));
+  auto slice = [](nntrainer::Tensor &tensor, unsigned int offset,
+                  unsigned int rows) {
+    auto dim = tensor.getDim();
+    dim.height(rows);
+    return tensor.getSharedDataTensor(
+      dim, static_cast<size_t>(offset) * tensor.width(), true);
+  };
+  auto q = slice(query, 0, step);
+  auto k = slice(key, 0, step);
+  auto v = slice(value, 0, step);
+  auto o = slice(output, 0, step);
+  auto float_dim = q.getDim();
+  float_dim.setDataType(ml::train::TensorDim::DataType::FP32);
+  nntrainer::Tensor q_float(float_dim, true), o_float(float_dim, true);
+  q_float.copyData(q);
+  apply_rotary_emb_tensor_v2(q_float, q_float, head_dim, cache_index);
+  float_dim = k.getDim();
+  float_dim.setDataType(ml::train::TensorDim::DataType::FP32);
+  nntrainer::Tensor k_float(float_dim, true), v_float(float_dim, true);
+  k_float.copyData(k);
+  v_float.copyData(v);
+
+  if (cache_index == 0) {
+    // Full prompt K/V exist for just this layer. Attention is dense before
+    // selection, so every layer's prompt hidden states retain dense semantics.
+    auto dim = cache_key.getDim();
+    dim.height(step);
+    nntrainer::Tensor prompt_keys(dim, true), prompt_values(dim, true);
+    apply_rotary_emb_tensor_v2(k_float, prompt_keys, head_dim, 0);
+    for (size_t i = 0; i < static_cast<size_t>(step) * dim.width(); ++i)
+      prompt_values.getData<uint16_t>()[i] =
+        nntrainer::compute_fp32_to_fp16(v_float.getData<float>()[i]);
+    gemm_attention(q_float, prompt_keys, prompt_values, o_float, step, step, 0);
+    manifold_kv.compress(prompt_keys, prompt_values, cache_key, cache_value,
+                         num_heads_KV, head_dim);
+  } else {
+    const auto physical = manifold_kv.physicalPosition(cache_index);
+    auto write_key = slice(cache_key, physical, step);
+    auto write_value = slice(cache_value, physical, step);
+    // Only incoming keys are rotated, at their original logical positions.
+    // Selected keys retain their RoPE bytes even when physical rows change.
+    apply_rotary_emb_tensor_v2(k_float, write_key, head_dim, cache_index);
+    for (size_t i = 0; i < write_value.size(); ++i)
+      write_value.getData<uint16_t>()[i] =
+        nntrainer::compute_fp32_to_fp16(v_float.getData<float>()[i]);
+    auto read_key = slice(cache_key, 0, physical + step);
+    auto read_value = slice(cache_value, 0, physical + step);
+    gemm_attention(q_float, read_key, read_value, o_float, physical + step,
+                   step, physical);
+  }
+  o.copyData(o_float);
+  manifold_kv.finishStep(cache_index, step);
+  cache_index += step;
+}
+
 void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
                               bool training) {
+  if (manifold_kv.enabled()) {
+    forwardingManifoldKV(context, training);
+    return;
+  }
   if (!use_external_cache) {
     // 3/4-input (internal KV cache) mode: full-sequence self-attention.
     //
@@ -1490,6 +1586,9 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
 void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
                                           unsigned int _from, unsigned int _to,
                                           bool training) {
+  if (manifold_kv.enabled() && _to <= _from)
+    throw std::invalid_argument(
+      "Cache eviction requires a non-empty forward step");
   // External KV cache path: from/to are interpreted as the absolute write
   // position; route through forwarding() which reads cache_key/cache_value
   // from input slots 3/4. forwarding() advances cache_index internally.
@@ -6166,6 +6265,8 @@ void MHACoreLayer::setProperty(const std::vector<std::string> &values) {
     if (nntrainer::getKeyValue(value, key, parsed_value) == ML_ERROR_NONE &&
         key == "cache_index") {
       setCacheIndex(static_cast<unsigned int>(std::stoul(parsed_value)));
+    } else if (manifold_kv.consumeProperty(key, parsed_value)) {
+      continue;
     } else {
       props.push_back(value);
     }

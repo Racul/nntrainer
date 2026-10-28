@@ -39,6 +39,7 @@
 #include <cpu_backend.h>
 #include <layer_impl.h>
 #include <limits.h>
+#include <manifold_kv.h>
 #include <util_simd.h>
 
 #include <map>
@@ -501,6 +502,9 @@ public:
   inline static const std::string type = "mha_core";
 
 private:
+  ManifoldKVState manifold_kv;
+  /** @brief Dense prompt attention followed by one-shot geometric selection. */
+  void forwardingManifoldKV(nntrainer::RunLayerContext &context, bool training);
   std::tuple<
     nntrainer::props::NumHeads, props::NumHeads_KV,
     nntrainer::props::ProjectedKeyDim, nntrainer::props::ProjectedValueDim,

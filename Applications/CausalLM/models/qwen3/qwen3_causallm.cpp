@@ -107,6 +107,8 @@ Tensor Qwen3Transformer::createAttention(const int layer_id, int seq_len,
       withKey("max_position_embeddings", MAX_POSITION_EMBEDDINGS),
       withKey("max_new_tokens", std::to_string(NUM_TO_GENERATE)),
       withKey("is_causal", IS_CAUSAL ? "true" : "false"),
+      withKey("manifold_kv_budget", manifold_kv.budget),
+      withKey("manifold_kv_window_size", manifold_kv.window_size),
       // nntr_config "use_flash_attention" (default true) selects the flash
       // (GEMM) arm: the host one on the cpu engine, and on a GPU engine the
       // device attention (cuda_attention, or the OpenCL flash / image arm

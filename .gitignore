@@ -97,6 +97,7 @@ Applications/**/tokenizers-build/*
 
 # log files
 *.log
+logs/manifold_kv/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

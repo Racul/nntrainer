@@ -325,6 +325,32 @@ void Transformer::setupParameters(json &cfg, json &generation_cfg,
     }
   }
   MAX_SEQ_LEN = nntr_cfg["max_seq_len"];
+  manifold_kv = {};
+  if (nntr_cfg.contains("manifold_kv")) {
+    if (nntr_cfg.contains("streaming_llm") || nntr_cfg.contains("snapkv"))
+      throw std::invalid_argument(
+        "ManifoldKV cannot be combined with another eviction policy");
+    if (strToModelType(nntr_cfg.value("model_type", std::string())) !=
+          ModelType::CAUSALLM ||
+        cfg.value("model_type", std::string()) != "qwen3")
+      throw std::invalid_argument(
+        "ManifoldKV currently supports Qwen3 CausalLM only");
+    const auto &settings = nntr_cfg.at("manifold_kv");
+    if (!settings.is_object())
+      throw std::invalid_argument("manifold_kv must be a JSON object");
+    for (auto it = settings.begin(); it != settings.end(); ++it)
+      if (it.key() != "budget" && it.key() != "window_size")
+        throw std::invalid_argument("Unknown manifold_kv setting: " + it.key());
+    manifold_kv.budget =
+      settings.contains("budget")
+        ? ManifoldKVConfig::parseUnsigned(settings.at("budget").dump())
+        : 256;
+    manifold_kv.window_size =
+      settings.contains("window_size")
+        ? ManifoldKVConfig::parseUnsigned(settings.at("window_size").dump())
+        : 0;
+    manifold_kv.capacity(MAX_SEQ_LEN, 0);
+  }
   // num_to_generate is optional: absent (or <= 0) means "no explicit cap",
   // i.e. generate until EOS or until the context window runs out. 0 is the
   // sentinel every consumer below tests for.
