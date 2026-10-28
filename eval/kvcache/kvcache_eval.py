@@ -62,6 +62,8 @@ PRESETS = {
 CONTROLLED_KEYS = ("sample_input", "init_seq_len", "max_seq_len", "num_to_generate", "batch_size",
                    "model_file_name", "tokenizer_file", "embedding_file_name",
                    "chat_input", "system_prompt", "skip_prefill")
+# nntr_config.json keys naming model files; the harness passes them as absolute paths.
+ASSET_KEYS = ("model_file_name", "tokenizer_file", "embedding_file_name")
 # Labels name log files and table columns.
 LABEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # The agreed memory metric is the unmodified repository script.
@@ -420,6 +422,95 @@ def environment():
     return info
 
 
+def local_env(binary):
+    env = dict(os.environ, NNTR_ENGINE="cpu", **THREADS)
+    env["PATH"] = os.pathsep.join([str(Path(binary).parent), env.get("PATH", "")])
+    return env
+
+
+class LocalTarget:
+    """Where trials run: this machine, pinned with taskset on Linux.
+
+    A target validates the builds, describes its fixed runtime for the
+    protocol (resume compares it), may report values that change between
+    resumes (volatile, kept in the manifest only), and opens a session that
+    runs the trials. android_eval.py provides the Android target.
+    """
+    kind = "local"
+
+    def __init__(self, cpus):
+        self.cpus = cpus
+
+    def check(self, kind):
+        if kind == "perf":
+            if WINDOWS:
+                raise ValueError("perf measures memory with the original mem_usage.sh and supports Linux only")
+            if sha(MEMORY_SCRIPT) != MEMORY_SCRIPT_SHA:
+                raise ValueError("The original Applications/utils/mem_usage.sh changed")
+
+    def builds(self, binaries):
+        builds = {name: load_build(binary) for name, binary in binaries.items()}
+        for name, build in builds.items():
+            if not build["options"]["enable-transformer"] or any(build["options"][key] for key in DEVICE_KEYS):
+                raise ValueError(f"Build {name} for CPU with enable-transformer=true")
+        return builds
+
+    def describe(self, protocol):
+        libraries = {}
+        if not WINDOWS:
+            subprocess.run(["taskset", "-c", self.cpus, "true"], check=True)
+            for name, binary in protocol["binaries"].items():
+                loaded = subprocess.check_output(["ldd", binary], env=local_env(binary), text=True)
+                if "not found" in loaded:
+                    raise RuntimeError("Missing runtime libraries: " + loaded)
+                libraries[name] = {p: sha(Path(p)) for p in re.findall(r"=> (\S+)", loaded) if Path(p).is_file()}
+        return dict(cpu_affinity="not pinned" if WINDOWS else self.cpus, runtime_library_sha256=libraries,
+                    environment=environment())
+
+    def volatile(self):
+        return {}
+
+    def open(self, protocol):
+        return LocalSession(protocol, self.cpus)
+
+
+class LocalSession:
+    """Runs trials from a temporary model directory of configuration files.
+
+    A session puts the configuration files, runs one trial at a time and may
+    add fields to each trial's record (before_trial / after_trial).
+    """
+
+    def __init__(self, protocol, cpus):
+        self.binaries, self.cpus, self.kind = protocol["binaries"], cpus, protocol["kind"]
+
+    def __enter__(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix=f"nntr-kvcache-{self.kind}-")
+        self.model = Path(self.tmp.name)
+        return self
+
+    def __exit__(self, *exc):
+        self.tmp.cleanup()
+
+    def put(self, name, value):
+        (self.model / name).write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+    def before_trial(self, manifest):
+        return {}
+
+    def run(self, label, memory, stdout_path, stderr_path):
+        # Memory trials run the executable under the original script, which
+        # samples the model PID itself; latency trials run it alone.
+        binary = self.binaries[label]
+        command = (["bash", str(MEMORY_SCRIPT)] if memory else []) + [binary, str(self.model)]
+        if not WINDOWS:
+            command = ["taskset", "-c", self.cpus] + command
+        return run_model(command, local_env(binary), stdout_path, stderr_path)
+
+    def after_trial(self):
+        return {}
+
+
 def condition_specs(args, base_config):
     """Describe every condition without built-in knowledge of its method.
 
@@ -486,8 +577,9 @@ def condition_specs(args, base_config):
     return binaries, labels, specs, method_keys, forbidden
 
 
-def prepare_conditions(args):
-    """Shared setup: executables, method settings, model assets, builds, runtime."""
+def prepare_conditions(args, target):
+    """Shared setup: executables, method settings, model assets and builds;
+    the target adds where and how the executables run."""
     configs = {name: json.loads((args.model / name).read_text(encoding="utf-8-sig"))
                for name in ("config.json", "generation_config.json", "nntr_config.json")}
     nntr = configs["nntr_config.json"]
@@ -495,45 +587,27 @@ def prepare_conditions(args):
     if any(key in nntr for key in ("chat_input", "system_prompt")) or nntr.get("skip_prefill"):
         raise ValueError("Use plain sample_input with a fresh, full prefill")
     assets = {}
-    for key in ("model_file_name", "tokenizer_file", "embedding_file_name"):
+    for key in ASSET_KEYS:
         if nntr.get(key):
             path = Path(nntr[key])
             nntr[key] = str((path if path.is_absolute() else args.model / path).resolve())
             assets[key] = sha(Path(nntr[key]))
 
-    builds = {name: load_build(binary) for name, binary in binaries.items()}
+    builds = target.builds(binaries)
     build_difference = len({json.dumps(build, sort_keys=True) for build in builds.values()}) != 1
     if build_difference and not args.allow_build_difference:
         raise ValueError("Build options or compiler differ between conditions (--allow-build-difference compares "
                          "them anyway and marks the run): " + json.dumps(builds))
-    for name, build in builds.items():
-        if not build["options"]["enable-transformer"] or any(build["options"][key] for key in DEVICE_KEYS):
-            raise ValueError(f"Build {name} for CPU with enable-transformer=true")
-
-    envs = {}
-    for name, binary in binaries.items():
-        env = dict(os.environ, NNTR_ENGINE="cpu", **THREADS)
-        env["PATH"] = os.pathsep.join([str(binary.parent), env.get("PATH", "")])
-        envs[name] = env
-    libraries = {}
-    if not WINDOWS:
-        subprocess.run(["taskset", "-c", args.cpus, "true"], check=True)
-        for name, binary in binaries.items():
-            loaded = subprocess.check_output(["ldd", str(binary)], env=envs[name], text=True)
-            if "not found" in loaded:
-                raise RuntimeError("Missing runtime libraries: " + loaded)
-            libraries[name] = {p: sha(Path(p)) for p in re.findall(r"=> (\S+)", loaded) if Path(p).is_file()}
     protocol = dict(
         conditions=labels, condition_specs=specs, method_keys=method_keys, baseline_forbidden=forbidden,
         declared_revisions=parse_pairs(args.revision, "--revision"),
         batch_size=1, threads=THREADS, engine="cpu",
-        cpu_affinity="not pinned" if WINDOWS else args.cpus,
         model_configs=configs, asset_sha256=assets,
         binaries={name: str(path) for name, path in binaries.items()},
         binary_sha256={name: sha(path) for name, path in binaries.items()},
-        runtime_library_sha256=libraries, builds=builds, build_difference=build_difference,
-        environment=environment(), script_sha256=sha(Path(__file__)))
-    return protocol, envs
+        builds=builds, build_difference=build_difference, script_sha256=sha(Path(__file__)))
+    protocol.update(target.describe(protocol))
+    return protocol
 
 
 def open_run(out, protocol, records_name):
@@ -659,12 +733,24 @@ def write_quality_summary(out, manifest, records):
                                             for label in labels} for task in counts})
 
 
-def evaluate_quality(args):
+def start_run(manifest_path, manifest, target, **fields):
+    """Mark a run RUNNING; values that may change between resumes (battery,
+    host memory, ...) are kept per invocation in the manifest, not the protocol."""
+    manifest.update(status="RUNNING", controller_pid=os.getpid(), **fields)
+    state = target.volatile()
+    if state:
+        manifest.setdefault("target_state", []).append(dict(state, recorded_at=now()))
+    write_json(manifest_path, manifest)
+
+
+def evaluate_quality(args, target=None):
     from tokenizers import Tokenizer
+    target = target or LocalTarget(args.cpus)
+    target.check("quality")
     cases_manifest = json.loads(args.cases.with_suffix(".manifest.json").read_text(encoding="utf-8"))
     if sha(args.cases) != cases_manifest["cases_sha256"]:
         raise ValueError("Cases file differs from its manifest")
-    protocol, envs = prepare_conditions(args)
+    protocol = prepare_conditions(args, target)
     if protocol["asset_sha256"]["tokenizer_file"] != cases_manifest["tokenizer_sha256"]:
         raise ValueError("Tokenizer differs from the one used to prepare the cases")
     tasks = TASKS if args.tasks is None else args.tasks.split(",")
@@ -705,16 +791,13 @@ def evaluate_quality(args):
     out = args.output
     manifest_path, records_path, manifest, records = open_run(out, protocol, "records.jsonl")
     done = {(r["task"], r["index"], r["condition"]) for r in records}
-    manifest.update(status="RUNNING", controller_pid=os.getpid(), completed=len(records),
-                    expected=len(cases) * len(labels))
-    write_json(manifest_path, manifest)
+    start_run(manifest_path, manifest, target, completed=len(records), expected=len(cases) * len(labels))
     write_quality_summary(out, manifest, records)
     tokenizer = Tokenizer.from_file(protocol["model_configs"]["nntr_config.json"]["tokenizer_file"])
     newline = tokenizer.encode("\n", add_special_tokens=False).ids[-1]
     try:
-        with tempfile.TemporaryDirectory(prefix="nntr-kvcache-quality-") as tmp:
-            model = Path(tmp)
-            (model / "config.json").write_text(json.dumps(protocol["model_configs"]["config.json"]), encoding="utf-8")
+        with target.open(protocol) as session:
+            session.put("config.json", protocol["model_configs"]["config.json"])
             for case in cases:
                 ids = tokenizer.encode(case["prompt"], add_special_tokens=False).ids
                 if len(ids) != case["tokens"] or ids_sha(ids) != case["prompt_ids_sha256"]:
@@ -734,19 +817,18 @@ def evaluate_quality(args):
                     config = model_config(protocol, label, sample_input=case["prompt"],
                                           init_seq_len=case["tokens"] + 1, max_seq_len=protocol["max_seq_len"],
                                           num_to_generate=decode_steps)
-                    (model / "nntr_config.json").write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
-                    (model / "generation_config.json").write_text(json.dumps(generation), encoding="utf-8")
+                    fields = session.before_trial(manifest)
+                    session.put("nntr_config.json", config)
+                    session.put("generation_config.json", generation)
                     stem = f"{case['index']:04d}-{label}"
                     stdout_path, stderr_path = log_paths(out, case["task"], stem)
-                    command = [protocol["binaries"][label], str(model)]
-                    if not WINDOWS:
-                        command = ["taskset", "-c", args.cpus] + command
                     started_at = now()
                     manifest["active"] = dict(task=case["task"], index=case["index"], condition=label,
                                               started_at=started_at)
                     write_json(manifest_path, manifest)
                     print("START", case["task"], stem, "tokens", case["tokens"], flush=True)
-                    code, pid, duration, stdout = run_model(command, envs[label], stdout_path, stderr_path)
+                    code, pid, duration, stdout = session.run(label, False, stdout_path, stderr_path)
+                    fields.update(session.after_trial())
                     stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
                     pred, errors = "", []
                     try:
@@ -767,7 +849,7 @@ def evaluate_quality(args):
                                   quality_score=None if errors else score_prediction(scorer, case, scored),
                                   pid=pid, duration_s=round(duration, 3), started_at=started_at,
                                   stdout_log=str(stdout_path.relative_to(out)),
-                                  stderr_log=str(stderr_path.relative_to(out)), **metrics)
+                                  stderr_log=str(stderr_path.relative_to(out)), **metrics, **fields)
                     append_record(records_path, record)
                     records.append(record)
                     manifest.pop("active", None)
@@ -821,6 +903,23 @@ def perf_values(records, phase, context, label, key):
     return values
 
 
+def target_field_lines(protocol, records):
+    """Mean of each numeric per-trial field a target adds (protocol extra_columns),
+    such as the device temperature, per input and condition."""
+    labels, rows = protocol["conditions"], []
+    for context in protocol["contexts"]:
+        for column in protocol.get("extra_columns", []):
+            values = [[r[column] for r in records
+                       if r["valid"] and r["phase"] != "function" and r["context"] == context
+                       and r["condition"] == label and type(r.get(column)) in (int, float)] for label in labels]
+            if any(values):
+                rows.append(f"|{context}|{column}|" + "|".join(mean_sd(v) for v in values) + "|")
+    if not rows:
+        return []
+    return ["", "Target fields per trial, mean ± sample SD over valid latency and memory trials:", "",
+            "|Input|Field|" + "|".join(labels) + "|", "|---|---" + "|---" * len(labels) + "|"] + rows
+
+
 def write_perf_summary(out, manifest, records):
     protocol = manifest["protocol"]
     labels = protocol["conditions"]
@@ -853,6 +952,7 @@ def write_perf_summary(out, manifest, records):
         eos = [str(sum(1 for r in records if r["valid"] and r["phase"] == "latency" and r["context"] == context
                        and r["condition"] == label and r.get("early_eos"))) for label in labels]
         lines.append(f"|{context}|early EOS (latency trials)|" + "|".join(eos) + "|" * len(deltas) + "||")
+    lines += target_field_lines(protocol, records)
     lines += ["",
               "Change follows metric.md: (method / baseline − 1) × 100 for every metric, so negative is a",
               "decrease and positive an increase (lower time and memory are better, higher TPS is better).",
@@ -860,22 +960,23 @@ def write_perf_summary(out, manifest, records):
               "original Applications/utils/mem_usage.sh (smaps Rss sum, 1 s sampling, can miss spikes, fewer",
               "samples below 30 s). OS peak RSS is CausalLM's ru_maxrss line, a reference only.",
               "Equal-work comparisons need equal decode counts; inspect early EOS and trials.csv.",
-              "Temperature and CPU frequency are not controlled or recorded on WSL (N/A).",
+              protocol.get("environment_note",
+                           "Temperature and CPU frequency are not controlled or recorded on WSL (N/A)."),
+              *manifest.get("target_notes", []),
               f"Invalid trials: {sum(not r['valid'] for r in records)}."] + condition_lines(protocol)
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     with (out / "trials.csv.tmp").open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=PERF_COLUMNS, extrasaction="ignore")
+        writer = csv.DictWriter(stream, fieldnames=PERF_COLUMNS + protocol.get("extra_columns", []),
+                                extrasaction="ignore")
         writer.writeheader()
         writer.writerows(records)
     (out / "trials.csv.tmp").replace(out / "trials.csv")
 
 
-def evaluate_perf(args):
-    if WINDOWS:
-        raise ValueError("perf measures memory with the original mem_usage.sh and supports Linux only")
-    if sha(MEMORY_SCRIPT) != MEMORY_SCRIPT_SHA:
-        raise ValueError("The original Applications/utils/mem_usage.sh changed")
-    protocol, envs = prepare_conditions(args)
+def evaluate_perf(args, target=None):
+    target = target or LocalTarget(args.cpus)
+    target.check("perf")
+    protocol = prepare_conditions(args, target)
     task, _, index = args.case.partition(":")
     if task not in TASKS or not index.isdigit():
         raise ValueError("--case must be TASK:INDEX of a LongBench v1 task")
@@ -928,14 +1029,12 @@ def evaluate_perf(args):
     out = args.output
     manifest_path, records_path, manifest, records = open_run(out, protocol, "trials.jsonl")
     done = {(r["phase"], r["context"], r["condition"], r["trial"]) for r in records}
-    manifest.update(status="RUNNING", controller_pid=os.getpid(), completed=len(records), expected=len(plan))
-    write_json(manifest_path, manifest)
+    start_run(manifest_path, manifest, target, completed=len(records), expected=len(plan))
     write_perf_summary(out, manifest, records)
     try:
-        with tempfile.TemporaryDirectory(prefix="nntr-kvcache-perf-") as tmp:
-            model = Path(tmp)
+        with target.open(protocol) as session:
             for name in ("config.json", "generation_config.json"):
-                (model / name).write_text(json.dumps(protocol["model_configs"][name]), encoding="utf-8")
+                session.put(name, protocol["model_configs"][name])
             for phase, context, label, trial, position in plan:
                 if (phase, context, label, trial) in done:
                     continue
@@ -944,19 +1043,17 @@ def evaluate_perf(args):
                 tokens = cases[context]["tokens"]
                 config = model_config(protocol, label, sample_input=prompts[context], init_seq_len=tokens + 1,
                                       max_seq_len=max_seq_len, num_to_generate=args.n_gen)
-                (model / "nntr_config.json").write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+                fields = session.before_trial(manifest)
+                session.put("nntr_config.json", config)
                 stem = f"{phase}-{context}-{label}-{trial:02d}"
                 stdout_path, stderr_path = log_paths(out, "perf", stem)
-                # Memory trials run the executable under the original script,
-                # which samples the model PID itself; latency trials run it alone.
-                command = (["taskset", "-c", args.cpus] + (["bash", str(MEMORY_SCRIPT)] if phase == "memory" else [])
-                           + [protocol["binaries"][label], str(model)])
                 started_at = now()
                 manifest["active"] = dict(phase=phase, context=context, condition=label, trial=trial,
                                           started_at=started_at)
                 write_json(manifest_path, manifest)
                 print("START", stem, flush=True)
-                code, pid, duration, stdout = run_model(command, envs[label], stdout_path, stderr_path)
+                code, pid, duration, stdout = session.run(label, phase == "memory", stdout_path, stderr_path)
+                fields.update(session.after_trial())
                 stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
                 errors = []
                 try:
@@ -978,7 +1075,7 @@ def evaluate_perf(args):
                               started_at=started_at, pid=pid, duration_s=round(duration, 3),
                               valid=not errors, failure="; ".join(errors),
                               stdout_log=str(stdout_path.relative_to(out)),
-                              stderr_log=str(stderr_path.relative_to(out)), **metrics)
+                              stderr_log=str(stderr_path.relative_to(out)), **metrics, **fields)
                 append_record(records_path, record)
                 records.append(record)
                 manifest.pop("active", None)
@@ -1010,15 +1107,12 @@ def report(args):
     print((args.output / "summary.md").read_text(encoding="utf-8"), end="")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    commands = parser.add_subparsers(dest="command", required=True)
+def perf_parser_parents():
+    """Parent parsers of the model, condition and perf options; android_eval.py
+    builds its perf command from the same ones. New parsers on every call, so a
+    caller may change their defaults."""
     model = argparse.ArgumentParser(add_help=False)
     model.add_argument("--model", type=Path, required=True, help="model directory with nntr_config.json")
-    longbench = argparse.ArgumentParser(add_help=False)
-    longbench.add_argument("--official", type=Path, required=True,
-                           help="official LongBench v1 directory containing eval.py, metrics.py and config/")
-    longbench.add_argument("--cases", type=Path, required=True, help="prepared cases JSONL")
     conditions = argparse.ArgumentParser(add_help=False)
     conditions.add_argument("--condition", action="append", required=True, metavar="LABEL=BINARY",
                             help="repeatable; LABEL is free ([A-Za-z0-9._-]), 'baseline' is the reference, "
@@ -1037,9 +1131,53 @@ def main():
                             help="compare executables whose Meson options or compiler differ; the run is marked")
     conditions.add_argument("--revision", action="append", default=[], metavar="LABEL=REV",
                             help="record the source revision each executable was built from")
-    conditions.add_argument("--cpus", default="0,2,4,6", help="Linux taskset affinity")
     conditions.add_argument("--output", type=Path, help="run directory; an existing one is resumed")
     conditions.add_argument("--check", action="store_true", help="validate inputs without inference")
+
+    perf = argparse.ArgumentParser(add_help=False)
+    perf.add_argument("--official", type=Path, required=True,
+                      help="official LongBench v1 directory containing eval.py, metrics.py and config/")
+    perf.add_argument("--data", type=Path, required=True, help="extracted v1 JSONL directory, not LongBench-E")
+    perf.add_argument("--case", default=PERF_CASE, help=f"LongBench TASK:INDEX used as input (default {PERF_CASE})")
+    perf.add_argument("--contexts", default="512,1024,2048", help="comma-separated prompt token limits")
+    perf.add_argument("--n-gen", type=int, default=128, help="maximum decode steps (default 128)")
+    perf.add_argument("--max-seq-len", type=int, help="cache capacity (default: max(2048, longest limit) + n-gen)")
+    perf.add_argument("--repeat", type=int, default=3,
+                      help="latency trials per input and condition (default %(default)s)")
+    perf.add_argument("--memory-repeat", type=int, default=1,
+                      help="memory trials per input and condition (default %(default)s)")
+    perf.add_argument("--interval", type=float, default=1.0, help="seconds between trials (default 1)")
+    return model, conditions, perf
+
+
+def resolve_paths(args):
+    for field in ("model", "official", "cases", "data", "output"):
+        if getattr(args, field, None) is not None:
+            setattr(args, field, getattr(args, field).resolve())
+
+
+def check_perf_args(parser, args):
+    """Validate perf options after resolve_paths(); shared with android_eval.py."""
+    if args.output is None and not args.check:
+        parser.error("perf requires --output unless --check is given")
+    try:
+        args.contexts = [int(n) for n in args.contexts.split(",")]
+    except ValueError:
+        parser.error("--contexts must be comma-separated integers")
+    if (not args.contexts or min(args.contexts) < 1 or len(set(args.contexts)) != len(args.contexts)
+            or args.n_gen < 1 or args.repeat < 1 or args.memory_repeat < 1 or args.interval < 0):
+        parser.error("positive unique contexts, n-gen, repeat and memory-repeat, and a nonnegative "
+                     "interval are required")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    model, conditions, perf_options = perf_parser_parents()
+    longbench = argparse.ArgumentParser(add_help=False)
+    longbench.add_argument("--official", type=Path, required=True,
+                           help="official LongBench v1 directory containing eval.py, metrics.py and config/")
+    longbench.add_argument("--cases", type=Path, required=True, help="prepared cases JSONL")
 
     prepare = commands.add_parser("prepare", parents=[model, longbench], help="tokenize the official dataset once")
     prepare.add_argument("--data", type=Path, required=True, help="extracted v1 JSONL directory, not LongBench-E")
@@ -1050,58 +1188,45 @@ def main():
     quality.add_argument("--tasks", help="comma-separated task subset (default: all 21)")
     quality.add_argument("--samples-per-task", type=int, help="fixed subset: dataset indices 0..N-1 of each task")
 
-    perf = commands.add_parser("perf", parents=[model, conditions], help="latency and memory trials")
-    perf.add_argument("--official", type=Path, required=True,
-                      help="official LongBench v1 directory containing eval.py, metrics.py and config/")
-    perf.add_argument("--data", type=Path, required=True, help="extracted v1 JSONL directory, not LongBench-E")
-    perf.add_argument("--case", default=PERF_CASE, help=f"LongBench TASK:INDEX used as input (default {PERF_CASE})")
-    perf.add_argument("--contexts", default="512,1024,2048", help="comma-separated prompt token limits")
-    perf.add_argument("--n-gen", type=int, default=128, help="maximum decode steps (default 128)")
-    perf.add_argument("--max-seq-len", type=int, help="cache capacity (default: max(2048, longest limit) + n-gen)")
-    perf.add_argument("--repeat", type=int, default=3, help="latency trials per input and condition (default 3)")
-    perf.add_argument("--memory-repeat", type=int, default=1,
-                      help="memory trials per input and condition (default 1)")
-    perf.add_argument("--interval", type=float, default=1.0, help="seconds between trials (default 1)")
+    perf = commands.add_parser("perf", parents=[model, conditions, perf_options], help="latency and memory trials")
+    for local in (quality, perf):
+        local.add_argument("--cpus", default="0,2,4,6", help="Linux taskset affinity")
 
     summary = commands.add_parser("report", help="rewrite summary.md from records")
     summary.add_argument("output", type=Path)
 
     args = parser.parse_args()
-    for field in ("model", "official", "cases", "data", "output"):
-        if getattr(args, field, None) is not None:
-            setattr(args, field, getattr(args, field).resolve())
-    if args.command in ("quality", "perf") and args.output is None and not args.check:
-        parser.error(args.command + " requires --output unless --check is given")
+    resolve_paths(args)
     if args.command == "prepare":
         if args.max_input < 2:
             parser.error("--max-input must be at least 2")
         prepare_cases(args)
     elif args.command == "quality":
+        if args.output is None and not args.check:
+            parser.error("quality requires --output unless --check is given")
         evaluate_quality(args)
     elif args.command == "perf":
-        try:
-            args.contexts = [int(n) for n in args.contexts.split(",")]
-        except ValueError:
-            parser.error("--contexts must be comma-separated integers")
-        if (not args.contexts or min(args.contexts) < 1 or len(set(args.contexts)) != len(args.contexts)
-                or args.n_gen < 1 or args.repeat < 1 or args.memory_repeat < 1 or args.interval < 0):
-            parser.error("positive unique contexts, n-gen, repeat and memory-repeat, and a nonnegative "
-                         "interval are required")
+        check_perf_args(parser, args)
         evaluate_perf(args)
     else:
         report(args)
 
 
-if __name__ == "__main__":
+def cli(entry):
+    """Run a command line: SIGTERM stops a run like Ctrl-C, keeping completed records."""
     def terminate(_signum, _frame):
         raise KeyboardInterrupt()
 
     signal.signal(signal.SIGTERM, terminate)
     try:
-        main()
+        entry()
     except KeyboardInterrupt:
         print("Interrupted; completed records and raw logs were retained.", file=sys.stderr)
         sys.exit(130)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
         print("Error:", error, file=sys.stderr)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    cli(main)
