@@ -154,7 +154,8 @@ validation, resume and `report` are those described above, so every method is
 measured the same way: build its branch, stage the outputs, run `perf`.
 
 ```bash
-export ANDROID_NDK=$PWD/builddir/tools/android-ndk-r26d
+export ANDROID_NDK=$PWD/data/android-ndk-r26d   # outside builddir, which the build empties
+export PATH=$PWD/.venv/bin:$PATH                # meson
 ADB=/mnt/c/Users/<user>/AppData/Local/Android/Sdk/platform-tools/adb.exe   # Windows adb from WSL
 
 git switch X                                    # the method branch
@@ -174,6 +175,7 @@ timeout -s TERM 560 python3 eval/kvcache/android_eval.py perf --adb "$ADB" \
 
 Build:
 - `build_android.sh` starts `nproc` compile jobs. `taskset -c 0-3` limits it to four cores. Run one build at a time.
+- `tools/package_android.sh` empties an existing `builddir` (`meson --wipe`) before it builds the engine. Keep nothing else there, e.g. the NDK.
 - `--cache` reuses the engine (`libnntrainer.so`) whenever its build options match, even if engine sources changed. Do not use it for the first build of a checkout, or for a method that changes `nntrainer/` itself.
 
 `stage NAME --revision REV`:
@@ -182,6 +184,7 @@ Build:
   - `libnntrainer.so` and `libccapi-nntrainer.so` from `builddir/android_build_result/lib/arm64-v8a`;
   - `libc++_shared.so` from the NDK (`--ndk`, default `$ANDROID_NDK`).
 - Writes `build-info.json`: revision, engine and app Meson options, compilers, NDK revision, output times and sha256.
+  The engine's compiler is the Meson host compiler; ndk-build compiles the engine with the recorded NDK.
 - The outputs carry no git information, so stage right after building.
 - `build_android.sh` keeps only its last build. Stage main once; every method reuses it.
 

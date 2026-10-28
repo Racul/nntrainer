@@ -204,10 +204,13 @@ def stage_build(repo, name, revision, ndk, replace=False):
     if not (root / ".gitignore").exists():
         (root / ".gitignore").write_text("*\n")
     staging = Path(tempfile.mkdtemp(prefix=f".{name}-", dir=root))
+    staging.chmod(0o755)  # mkdtemp creates it private
     for file, source in sources.items():
         shutil.copy2(source, staging / file)
     kv.write_json(staging / "build-info.json", dict(
         revision=revision, staged_at=kv.now(), ndk=ndk_revision[1] if ndk_revision else None,
+        # The engine's compiler is Meson's host compiler; ndk-build compiles
+        # the engine itself with the recorded NDK.
         engine=kv.load_build(sources["libnntrainer.so"]),
         app=app_build(repo / Path(BUILD_OUTPUTS["nntr_causallm"]).parent),
         built_at={file: datetime.fromtimestamp(source.stat().st_mtime).astimezone().isoformat()

@@ -347,6 +347,7 @@ class StageCopiesBuild(unittest.TestCase):
         self.assertEqual(info["files"]["libcausallm.so"], kv.sha(self.repo / ae.BUILD_OUTPUTS["libcausallm.so"]))
         self.assertEqual(info["files"]["libc++_shared.so"], kv.sha(self.ndk / ae.LIBCXX_IN_NDK))
         self.assertEqual((self.repo / "build-android/.gitignore").read_text(), "*\n")
+        self.assertEqual(stage.stat().st_mode & 0o777, 0o755)
         with self.assertRaisesRegex(ValueError, "--replace"):
             ae.stage_build(self.repo, "main", "a" * 40, self.ndk)
         make_build(self.root, causallm=b"rebuilt")
