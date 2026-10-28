@@ -220,12 +220,13 @@ TEST(ManifoldKV, TinyModelActivationDisabledAndUnprunedEquivalence_p) {
     EXPECT_TRUE(model.hasRun());
     if (mode == -1)
       baseline = model.getOutputText();
-    if (mode != 2)
+    if (mode != 2) {
       EXPECT_EQ(model.getOutputText(), baseline);
+    }
     EXPECT_FALSE(model.getOutputText().empty());
-    if (mode <= 0)
+    if (mode <= 0) {
       EXPECT_EQ(log.find("[ManifoldKV"), std::string::npos);
-    else {
+    } else {
       EXPECT_NE(log.find("[ManifoldKV layer=0]"), std::string::npos);
       EXPECT_THROW(model.runPrompt("hello"), std::invalid_argument);
     }
