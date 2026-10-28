@@ -260,7 +260,7 @@ class FakeAdb(ae.AndroidDevice):
         super().__init__("adb")
         self.root, self.serials, self.temps = Path(root), list(serials), list(temps)
         self.level, self.mem_total, self.props = 80, 7_600_000, dict(GETPROP)
-        self.pushes, self.killed, self.running, self.runs = [], [], [], []
+        self.pushes, self.killed, self.running, self.runs, self.warms = [], [], [], [], []
         self.interrupt_at, self.corrupt, self.lines = None, False, method_lines
 
     def local(self, remote):
@@ -306,6 +306,9 @@ class FakeAdb(ae.AndroidDevice):
             return done(" ".join(self.running) + "\n", code=0) if self.running else done(code=1)
         if name == "pkill":
             self.killed.append(rest[-1])
+            return done()
+        if name == "timeout":
+            self.warms.append(command)
             return done()
         if name == "ls":
             folder = self.local(rest[0])
@@ -573,26 +576,38 @@ class GenericConditions(AndroidCase):
 
 
 class TemperatureGate(unittest.TestCase):
-    """T9, T10: waiting for the target temperature."""
+    """T9, T10: waiting for the target temperature, warming a cold device."""
 
     def wait(self, readings, max_wait=100):
-        now, sleeps, readings = [0.0], [], iter(readings)
+        now, actions, readings = [0.0], [], iter(readings)
 
         def sleep(seconds):
-            sleeps.append(seconds)
+            actions.append(("cool", seconds))
             now[0] += seconds
 
+        def warm():
+            actions.append(("warm", 5))
+            now[0] += 5
+
         result = ae.wait_for_temperature(lambda: next(readings), 36.5, max_wait, 10, sleep=sleep,
-                                         clock=lambda: now[0])
-        return result, sleeps
+                                         clock=lambda: now[0], floor=31.5, warm=warm)
+        return result, actions
 
     def test_waits_for_target(self):
-        self.assertEqual(self.wait([38.0, 37.2, 36.4]), ((36.4, 20.0), [10, 10]))
-        self.assertEqual(self.wait([36.5]), ((36.5, 0.0), []))
+        self.assertEqual(self.wait([38.0, 37.2, 36.4]), ((36.4, 20.0, 0.0), [("cool", 10), ("cool", 10)]))
+        self.assertEqual(self.wait([36.5]), ((36.5, 0.0, 0.0), []))
+        self.assertEqual(self.wait([31.5]), ((31.5, 0.0, 0.0), []))
+
+    def test_warms_a_cold_device(self):
+        self.assertEqual(self.wait([30.0, 31.0, 32.0]), ((32.0, 0.0, 10.0), [("warm", 5), ("warm", 5)]))
+        # A burst may overshoot the target; the device then cools back into range.
+        self.assertEqual(self.wait([30.0, 38.0, 36.0]), ((36.0, 10.0, 5.0), [("warm", 5), ("cool", 10)]))
 
     def test_stops(self):
         with self.assertRaisesRegex(RuntimeError, r"stayed above 36\.5 °C \(40\.0 °C after 30 s\)"):
             self.wait([40.0] * 10, max_wait=30)
+        with self.assertRaisesRegex(RuntimeError, r"stayed below 31\.5 °C \(20\.0 °C after 15 s\)"):
+            self.wait([20.0] * 10, max_wait=12)
         with tempfile.TemporaryDirectory() as root:
             for reading, message in (("abc", "not a number"), (200.0, "reads 200.0"), (0, "reads 0.0")):
                 with self.assertRaisesRegex(RuntimeError, message):
@@ -618,6 +633,25 @@ class FirstTrialTarget(AndroidCase):
         summary = (args.output / "summary.md").read_text()
         self.assertIn("Target temperature 36.0 °C (thermal_zone0), set by the first trial at ", summary)
         self.assertIn("|512|cool_wait_s|", summary)
+
+    def test_cold_device_is_warmed(self):
+        self.adb.interrupt_at = 1
+        args = self.standard()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_perf(args)
+        # Resumed far below the 36.0 °C target (the preflight reads first): warm until within 5 °C.
+        self.adb.interrupt_at, self.adb.temps = None, [29.0, 29.0, 30.5, 31.5, 33.0]
+        self.run_perf(args)
+        manifest, records = read_run(args.output)
+        self.assertEqual(manifest["status"], "COMPLETE")
+        self.assertEqual(manifest["protocol"]["warm_up"], dict(below_target_c=5.0, burst_s=5, busy_loops=4))
+        self.assertEqual(records[1]["temp_start_c"], 31.5)
+        self.assertEqual(len(self.adb.warms), 2)
+        self.assertEqual(self.adb.warms[0].count("timeout 5 sh -c 'while :; do :; done'"), 4)
+        self.assertTrue(all(r["warm_s"] >= 0 for r in records))
+        summary = (args.output / "summary.md").read_text()
+        self.assertIn("|512|warm_s|", summary)
+        self.assertIn("at most 5 °C below it", summary)
 
     def test_gate_timeout_leaves_no_record(self):
         self.adb.interrupt_at = 1

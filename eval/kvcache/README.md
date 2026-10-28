@@ -190,7 +190,7 @@ Build:
 
 `perf`:
 - Takes every `kvcache_eval.py perf` option except `--cpus`.
-- Adds `--adb`, `--serial`, `--device-dir` (default `/data/local/tmp/kvcache-eval`), `--thermal-zone` (default 0), `--max-cool-wait` (default 1,800 s) and `--cool-poll` (default 10 s).
+- Adds `--adb`, `--serial`, `--device-dir` (default `/data/local/tmp/kvcache-eval`), `--thermal-zone` (default 0), `--max-cool-wait` (default 1,800 s), `--cool-poll` (default 10 s) and `--warm-below` (default 5 °C).
 - The default is 1 latency and 1 memory trial per input and condition, plus the function checks.
 - `--revision` defaults to each stage's revision. A revision you give must name the same commit.
 - `--check` validates the device, the stages and the deployment without inference.
@@ -215,9 +215,12 @@ A trial:
 
 Temperature:
 - The run's first trial stores the `thermal_zone` temperature as the target. It goes to `thermal` in `manifest.json` and is noted in `summary.md`.
-- Every later trial starts only when the zone is at or below the target. This also holds after a resume. The temperature is read every `--cool-poll` seconds.
-- After `--max-cool-wait`, the run stops without writing a record. Resume it later; the target stays the same.
-- Each trial records `temp_start_c`, `temp_end_c`, `cool_wait_s` and the battery temperature, level and USB power. `summary.md` averages them per input and condition.
+- Every later trial starts only when the zone is at or below the target and at most `--warm-below` degrees below it. This also holds after a resume.
+  - Above the target, the temperature is read every `--cool-poll` seconds.
+  - Below that range, one shell busy loop per inference thread runs for 5 s, then the zone is read again. A burst may overshoot the target; the trial then waits until the zone cools back into range.
+  - `--warm-below` is part of the protocol (`warm_up`), so a resume keeps it.
+- If the zone stays out of range for `--max-cool-wait` seconds, the run stops without writing a record. Resume it later; the target stays the same.
+- Each trial records `temp_start_c`, `temp_end_c`, `cool_wait_s`, `warm_s` and the battery temperature, level and USB power. `summary.md` averages them per input and condition.
 
 Run long measurements in the foreground as `timeout -s TERM 560` chunks:
 - SIGTERM also stops the running trial on the device (`pkill -f <bin>/nntr_causallm`), and the next call resumes.

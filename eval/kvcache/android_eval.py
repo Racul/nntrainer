@@ -9,7 +9,8 @@ kvcache_eval.py; this file only adds an Android target for its trial loop.
   stage  copy the current build_android.sh outputs to build-android/NAME
   check  print the device state; no inference
   perf   latency and memory trials (default 1 + 1 per input and condition);
-         each trial waits until the device is as cool as at the first trial
+         each trial starts at most as warm as the first trial and at most
+         --warm-below degrees cooler (it waits to cool or warms the device)
 
 kvcache_eval.py report DIR rewrites the summary of an Android run as well.
 """
@@ -45,7 +46,12 @@ DEVICE_DIR = "/data/local/tmp/kvcache-eval"
 REMOTE_DIR = re.compile(r"(?:/[A-Za-z0-9_.-]+)+")
 # Room left free on the device beyond the files to push (tokenizer cache, logs).
 FREE_MARGIN_KIB = 64 * 1024
-TRIAL_COLUMNS = ["temp_start_c", "temp_end_c", "cool_wait_s", "battery_temp_c", "battery_level", "usb_powered"]
+TRIAL_COLUMNS = ["temp_start_c", "temp_end_c", "cool_wait_s", "warm_s", "battery_temp_c", "battery_level",
+                 "usb_powered"]
+# A device more than WARM_BELOW_C under the target is warmed in bursts of
+# WARM_BURST_S seconds, one shell busy loop per inference thread.
+WARM_BELOW_C = 5.0
+WARM_BURST_S = 5
 
 
 class AndroidDevice:
@@ -153,6 +159,12 @@ class AndroidDevice:
     def kill(self, pattern):
         self.shell(f"pkill -f {shlex.quote(pattern)}")
 
+    def warm(self, seconds, workers):
+        """Load workers CPUs with shell busy loops for seconds; timeout ends
+        them on the device even if adb is interrupted."""
+        loop = f"timeout {seconds} sh -c 'while :; do :; done'"
+        self.read(" & ".join([loop] * workers) + " & wait")
+
     def run(self, command, stdout_path, stderr_path):
         """A trial: the remote shell's output streams to the host log files."""
         return kv.run_model(self.argv("shell", command), dict(os.environ), stdout_path, stderr_path)
@@ -254,20 +266,30 @@ def fill_revisions(args):
     args.revision = revisions
 
 
-def wait_for_temperature(read, target, max_wait, poll, sleep=time.sleep, clock=time.monotonic, report=None):
-    """Poll read() until it is at or below target; return (temperature, seconds waited)."""
-    start = clock()
+def wait_for_temperature(read, target, max_wait, poll, sleep=time.sleep, clock=time.monotonic, report=None,
+                         floor=None, warm=None):
+    """Poll read() until floor <= temperature <= target. Above the target it
+    sleeps poll seconds; below floor it calls warm() for one burst.
+
+    Returns (temperature, seconds cooling, seconds warming)."""
+    start, spent = clock(), {"cool": 0.0, "warm": 0.0}
     temperature = read()
-    while temperature > target:
+    while temperature > target or (floor is not None and temperature < floor):
         waited = clock() - start
         if waited >= max_wait:
-            raise RuntimeError(f"The device stayed above {target:.1f} °C ({temperature:.1f} °C after {waited:.0f} s); "
-                               "let it cool and resume the run")
+            side = f"above {target:.1f}" if temperature > target else f"below {floor:.1f}"
+            raise RuntimeError(f"The device stayed {side} °C ({temperature:.1f} °C after {waited:.0f} s); "
+                               "resume the run once it is in range")
         if report:
             report(temperature, waited)
-        sleep(poll)
+        began, action = clock(), "cool" if temperature > target else "warm"
+        if action == "cool":
+            sleep(poll)
+        else:
+            warm()
         temperature = read()
-    return temperature, clock() - start
+        spent[action] += clock() - began
+    return temperature, spent["cool"], spent["warm"]
 
 
 def remote_command(bin_dir, trial_dir, memory, script):
@@ -308,9 +330,10 @@ class AndroidTarget:
     """
     kind = "android"
 
-    def __init__(self, device, device_dir=DEVICE_DIR, zone=0, max_cool_wait=1800, cool_poll=10):
+    def __init__(self, device, device_dir=DEVICE_DIR, zone=0, max_cool_wait=1800, cool_poll=10,
+                 warm_below=WARM_BELOW_C):
         self.device, self.dir, self.zone = device, device_dir, zone
-        self.max_cool_wait, self.cool_poll = max_cool_wait, cool_poll
+        self.max_cool_wait, self.cool_poll, self.warm_below = max_cool_wait, cool_poll, warm_below
         self.stages, self.missing = {}, []
 
     def check(self, kind):
@@ -346,6 +369,8 @@ class AndroidTarget:
         described = dict(
             target="android", device=self.info,
             thermal_zone=dict(index=self.zone, type=self.device.thermal_type(self.zone)),
+            warm_up=dict(below_target_c=self.warm_below, burst_s=WARM_BURST_S,
+                         busy_loops=int(kv.THREADS["NNTR_NUM_THREADS"])),
             device_dir=self.dir, cpu_affinity="not pinned",
             bundles={label: dict(id=content_id(stage["files"]), files=stage["files"])
                      for label, stage in self.stages.items()},
@@ -353,8 +378,9 @@ class AndroidTarget:
             extra_columns=TRIAL_COLUMNS,
             environment_note=(f"Android device {self.info['model']} ({self.info['soc']}), CPU not pinned. Each trial "
                               f"starts only when thermal_zone{self.zone} is at or below its temperature at the start "
-                              "of the run's first trial; temperatures, cooling wait and battery are recorded per "
-                              "trial."),
+                              f"of the run's first trial and at most {self.warm_below:g} °C below it (CPU busy loops "
+                              "warm a cooler device); temperatures, cooling and warm-up time and battery are recorded "
+                              "per trial."),
             android_script_sha256=kv.sha(Path(__file__)))
         _, _, files = device_layout(dict(protocol, **described), self.dir)
         present = self.device.sha256(list(files))
@@ -382,6 +408,7 @@ class AndroidSession:
     def __init__(self, target, protocol):
         self.device, self.zone, self.missing = target.device, target.zone, target.missing
         self.max_cool_wait, self.cool_poll = target.max_cool_wait, target.cool_poll
+        self.warm_up = protocol["warm_up"]
         self.bins, self.assets, self.files = device_layout(protocol, target.dir)
         self.trial, self.script = f"{target.dir}/trial", f"{target.dir}/mem_usage.sh"
         self.active = None
@@ -421,30 +448,38 @@ class AndroidSession:
 
     def before_trial(self, manifest):
         """The run's first trial sets the target temperature (kept in the
-        manifest across resumes); every later trial waits for it."""
+        manifest across resumes); every later trial starts between the target
+        less warm_up below_target_c and the target, cooling or warming."""
         def read():
             return self.device.temperature(self.zone)
+
+        def warm():
+            self.device.warm(self.warm_up["burst_s"], self.warm_up["busy_loops"])
 
         reported = []
 
         def report(temperature, waited):
-            # About once a minute while cooling.
-            if not reported or waited - reported[-1] >= 60:
-                reported.append(waited)
-                print(f"COOL thermal_zone{self.zone} {temperature:.1f} °C > {target:.1f} °C, "
+            # Each switch between cooling and warming, else about once a minute.
+            action = "COOL" if temperature > target else "WARM"
+            if not reported or reported[-1][0] != action or waited - reported[-1][1] >= 60:
+                reported.append((action, waited))
+                bound = f"> {target:.1f}" if action == "COOL" else f"< {floor:.1f}"
+                print(f"{action} thermal_zone{self.zone} {temperature:.1f} °C {bound} °C, "
                       f"waited {waited:.0f} s", flush=True)
 
         if "thermal" not in manifest:
-            temperature, waited = read(), 0.0
+            temperature, cooled, warmed = read(), 0.0, 0.0
             manifest["thermal"] = dict(zone=self.zone, target_c=temperature, set_at=kv.now())
             manifest.setdefault("target_notes", []).append(
                 f"Target temperature {temperature:.1f} °C (thermal_zone{self.zone}), set by the first trial at "
                 f"{manifest['thermal']['set_at']}.")
         else:
             target = manifest["thermal"]["target_c"]
-            temperature, waited = wait_for_temperature(read, target, self.max_cool_wait, self.cool_poll,
-                                                       report=report)
-        return dict(temp_start_c=temperature, cool_wait_s=round(waited, 1), **self.device.battery())
+            floor = target - self.warm_up["below_target_c"]
+            temperature, cooled, warmed = wait_for_temperature(read, target, self.max_cool_wait, self.cool_poll,
+                                                               report=report, floor=floor, warm=warm)
+        return dict(temp_start_c=temperature, cool_wait_s=round(cooled, 1), warm_s=round(warmed, 1),
+                    **self.device.battery())
 
     def run(self, label, memory, stdout_path, stderr_path):
         self.active = f"{self.bins[label]}/nntr_causallm"
@@ -505,6 +540,9 @@ def build_parser():
                       help="seconds a trial may wait for the target temperature before the run stops (default 1800)")
     perf.add_argument("--cool-poll", type=float, default=10,
                       help="seconds between temperature readings while waiting (default 10)")
+    perf.add_argument("--warm-below", type=float, default=WARM_BELOW_C,
+                      help="warm the device with CPU busy loops when it is more than this many °C below the "
+                           "target (default %(default)s)")
     perf.set_defaults(repeat=1)
     return parser
 
@@ -515,8 +553,8 @@ def main():
     if args.command != "stage" and (not REMOTE_DIR.fullmatch(args.device_dir)
                                     or ".." in args.device_dir.split("/")):
         parser.error("--device-dir must be an absolute path of [A-Za-z0-9_.-] names without ..")
-    if args.command == "perf" and (args.max_cool_wait < 0 or args.cool_poll <= 0):
-        parser.error("--max-cool-wait must be nonnegative and --cool-poll positive")
+    if args.command == "perf" and (args.max_cool_wait < 0 or args.cool_poll <= 0 or args.warm_below <= 0):
+        parser.error("--max-cool-wait must be nonnegative, --cool-poll and --warm-below positive")
     if args.command == "stage":
         if args.ndk is None:
             parser.error("stage needs --ndk or ANDROID_NDK")
@@ -529,7 +567,7 @@ def main():
         kv.check_perf_args(parser, args)
         fill_revisions(args)
         kv.evaluate_perf(args, AndroidTarget(AndroidDevice(args.adb, args.serial), args.device_dir,
-                                             args.thermal_zone, args.max_cool_wait, args.cool_poll))
+                                             args.thermal_zone, args.max_cool_wait, args.cool_poll, args.warm_below))
 
 
 if __name__ == "__main__":
