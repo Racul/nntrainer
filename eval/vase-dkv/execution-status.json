@@ -2,11 +2,11 @@
   "method": "VaSE-DKV",
   "branch": "vase-dkv",
   "baseline_commit": "7d14d001c9e70014de515dbd00ee6986d50d365f",
-  "status": "awaiting_user_signal",
-  "build_run": false,
-  "tests_run": false,
-  "inference_run": false,
-  "benchmark_run": false,
+  "status": "COMPLETE",
+  "build_run": true,
+  "tests_run": true,
+  "inference_run": true,
+  "benchmark_run": true,
   "sequential_order": [
     "manifoldkv",
     "vase-dkv",
@@ -23,5 +23,42 @@
     "repo": "terarachang/VaSE",
     "commit": "a7a523d8cde1ff9248925c4978ba8ffe7b3630bc",
     "file": "eval/reasoning_tasks/modified/transformers/cache_utils.py"
-  }
+  },
+  "run_directory": "/home/jmsmlove02/26-2/nntrainer/build/validation/kv-sequential-20261023",
+  "sequence": "ManifoldKV Linux/native Windows, then VaSE-DKV Linux/native Windows, then DropKV Linux/native Windows",
+  "benchmark_complete": true,
+  "measured_trials": 72,
+  "expected_measured_trials": 72,
+  "platform_counts": {
+    "linux": {
+      "completed": 36,
+      "expected": 36,
+      "status": "COMPLETE",
+      "pending": []
+    },
+    "windows": {
+      "completed": 36,
+      "expected": 36,
+      "status": "COMPLETE",
+      "pending": []
+    }
+  },
+  "actual_decode_tokens": [
+    128
+  ],
+  "result": "results/20261023-cpu.md",
+  "publication_date": "2026-10-28",
+  "inference_executed_for_publication": false,
+  "aggregate": {
+    "linux": {
+      "latency_change_pct": -12.224460121944801,
+      "memory_change_pct": -6.5432935274686965
+    },
+    "windows": {
+      "latency_change_pct": -12.184164455261515,
+      "memory_change_pct": -0.18545382035161095
+    }
+  },
+  "quality": "NOT_EVALUATED",
+  "restart_authorized": false
 }
