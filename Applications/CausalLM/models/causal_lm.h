@@ -431,6 +431,9 @@ protected:
    */
   unsigned int REPETITION_WINDOW;
   unsigned int global_token_len;
+  std::string probkv_config_;    /**< serialized ProbKVConfig; empty: off */
+  std::string probkv_describe_;  /**< ProbKV settings for the log line */
+  unsigned int probkv_runs_ = 0; /**< run id for the ProbKV global solve */
 
   causallm::SamplingRng rng{causallm::kDefaultSamplingSeed}; /**< sampler RNG */
   bool sampling_seed_pending_ = false; /**< setSamplingSeed() for next run */

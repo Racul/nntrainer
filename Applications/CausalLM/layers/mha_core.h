@@ -39,6 +39,7 @@
 #include <cpu_backend.h>
 #include <layer_impl.h>
 #include <limits.h>
+#include <prob_kv.h>
 #include <util_simd.h>
 
 #include <map>
@@ -521,6 +522,7 @@ private:
 
   float epsilon;            /** to avoid overflow */
   unsigned int cache_index; /** idx of kv cache */
+  ProbKVState probkv_;      /** Optional probabilistic prompt eviction. */
 
   /**
    * @brief Honor the LayerImpl `skip_prefill` property. Gemma4 KV-shared
@@ -575,9 +577,12 @@ private:
   unsigned int kv_ring_cap = 0;
   /** Map an absolute cache position to its physical ring row (identity when the
    * ring is off). Used ONLY for cache-storage row offsets: RoPE and the
-   * causal/window masks keep the absolute position. */
+   * causal/window masks keep the absolute position. After ProbKV compacts the
+   * prompt (never together with a ring), rows shift down by the evicted
+   * count. */
   inline size_t cacheRow(size_t abs_pos) const {
-    return kv_ring_cap ? (abs_pos % (size_t)kv_ring_cap) : abs_pos;
+    return kv_ring_cap ? (abs_pos % (size_t)kv_ring_cap)
+                       : abs_pos - probkv_.removed();
   }
   bool use_sink = false;
   float attn_logit_softcapping = 0.0f;
