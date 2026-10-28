@@ -112,6 +112,20 @@ TEST(DropKV, SquaredPerturbationAndPostScoreGQA_p) {
     causallm::DropKVState::scores({0, 0}, {0, 0, 0}, {0, 2, 10}, 3, 1, 2, 1);
   for (size_t i = 0; i < scores.size(); ++i)
     EXPECT_NEAR(gqa[i], scores[i], 1e-5);
+
+  // Distinct heads distinguish mean-of-loss from loss-of-mean probabilities.
+  // Q=+/-log(2), K=[1,0], V=[0,2] gives P=[2/3,1/3] and [1/3,2/3].
+  const float log_two = std::log(2.0f);
+  const auto distinct = causallm::DropKVState::scores(
+    {log_two, -log_two}, {1, 0}, {0, 2}, 2, 1, 2, 1);
+  const double high = (2.0 / 3) / (1.0 / 3 + 1e-6);
+  const double low = (1.0 / 3) / (2.0 / 3 + 1e-6);
+  const double expected = (high * high * 4.0 / 9 + low * low * 16.0 / 9) / 2;
+  EXPECT_NEAR(distinct[0], expected, 1e-5);
+  EXPECT_NEAR(distinct[1], expected, 1e-5);
+  const auto pre_reduced =
+    causallm::DropKVState::scores({0}, {1, 0}, {0, 2}, 2, 1, 1, 1);
+  EXPECT_GT(std::abs(distinct[0] - pre_reduced[0]), .05);
 }
 
 TEST(DropKV, CausalQueryWindowAndOfficialAveragePool_p) {
@@ -239,12 +253,13 @@ TEST(DropKV, TinyModelActivationDisabledAndUnprunedEquivalence_p) {
     EXPECT_TRUE(model.hasRun());
     if (mode == -1)
       baseline = model.getOutputText();
-    if (mode != 2)
+    if (mode != 2) {
       EXPECT_EQ(model.getOutputText(), baseline);
+    }
     EXPECT_FALSE(model.getOutputText().empty());
-    if (mode <= 0)
+    if (mode <= 0) {
       EXPECT_EQ(log.find("[DropKV"), std::string::npos);
-    else {
+    } else {
       EXPECT_NE(log.find("[DropKV layer=0]"), std::string::npos);
       EXPECT_THROW(model.runPrompt("hello"), std::invalid_argument);
     }
