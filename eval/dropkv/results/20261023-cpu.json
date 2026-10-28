@@ -1892,22 +1892,34 @@
           ]
         },
         "memory_baseline": {
-          "n": 1,
-          "mean": 3153140.0,
-          "sd": null,
+          "n": 3,
+          "mean": 3156308.0,
+          "sd": 5833.444265611869,
           "raw": [
-            3153140.0
+            3153140.0,
+            3163040.0,
+            3152744.0
           ],
           "decode": [
+            128,
+            128,
             128
           ]
         },
         "memory_dropkv": {
-          "n": 0,
-          "mean": null,
-          "sd": null,
-          "raw": [],
-          "decode": []
+          "n": 3,
+          "mean": 2907086.6666666665,
+          "sd": 135965.34172109206,
+          "raw": [
+            2750096.0,
+            2987004.0,
+            2984160.0
+          ],
+          "decode": [
+            128,
+            128,
+            128
+          ]
         }
       },
       "stage_times_ms": {
@@ -1955,7 +1967,9 @@
             ]
           }
         }
-      }
+      },
+      "latency_change_pct": -12.184028220843734,
+      "memory_change_pct": -7.895976353807466
     }
   ],
   "platforms": {
@@ -4533,6 +4547,7 @@
           }
         }
       ],
+      "interrupted_logs": [],
       "status": "COMPLETE",
       "started_at": "2026-10-23T08:27:01.566890+09:00",
       "finished_at": "2026-10-23T09:25:07.420231+09:00",
@@ -6607,68 +6622,320 @@
             "tokenizer_file": "C:\\tmp\\nntrainer-baseline-20261011\\models\\qwen3-fp32\\tokenizer.json",
             "lmhead_dtype": "FP32"
           }
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "dropkv",
+          "trial": 1,
+          "position": 2,
+          "started_at": "2026-10-28T22:14:50.730293+09:00",
+          "status": "COMPLETE",
+          "valid": true,
+          "command": [
+            "C:\\tmp\\nntrainer-kv-20261023\\dropkv\\source\\build\\Applications\\CausalLM\\nntr_causallm_eval.exe",
+            "C:\\Users\\jmsml\\AppData\\Local\\Temp\\nntr-dropkv-eval-hm11e4oo"
+          ],
+          "log": "logs\\memory-4096-dropkv-01.log",
+          "memory_log": "logs\\memory-4096-dropkv-01-working-set.csv",
+          "target_pid": 39048,
+          "duration_s": 632.656,
+          "samples": 11304,
+          "sampled_peak_working_set_kib": 2750096.0,
+          "observed_os_peak_working_set_kib": 2750096.0,
+          "prefill_tokens": 4096,
+          "prefill_ms": 556064,
+          "prefill_tps": 7.36606,
+          "generation_tokens": 128,
+          "generation_ms": 68882,
+          "generation_tps": 1.85825,
+          "total_ms": 624978,
+          "e2e_ms": 629562,
+          "early_eos": false,
+          "kv_prefill_retained": 409,
+          "kv_peak_allocated_bytes": 2199552,
+          "kv_evictions": 1,
+          "failure": "",
+          "config_sha256": "d5692b6f3eec7ce9522e3cd9becc1a0cc50ec342120fb63127ea534ad8ac2c51",
+          "config_without_prompt": {
+            "model_type": "CausalLM",
+            "model_tensor_type": "FP32-FP32",
+            "model_file_name": "C:\\tmp\\nntrainer-baseline-20261011\\models\\qwen3-fp32\\nntr_qwen3_0.6b_fp32.bin",
+            "fc_layer_dtype": "FP32",
+            "embedding_dtype": "FP32",
+            "lora_rank": 0,
+            "lora_alpha": 0,
+            "lora_target": [],
+            "bad_word_ids": [],
+            "fsu": false,
+            "fsu_lookahead": 2,
+            "num_to_generate": 128,
+            "init_seq_len": 4096,
+            "max_seq_len": 4225,
+            "batch_size": 1,
+            "tokenizer_file": "C:\\tmp\\nntrainer-baseline-20261011\\models\\qwen3-fp32\\tokenizer.json",
+            "lmhead_dtype": "FP32",
+            "dropkv": {
+              "enabled": true,
+              "keep_ratio": 0.1,
+              "window": 8,
+              "kernel": 11,
+              "pooling": "max"
+            }
+          }
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "dropkv",
+          "trial": 2,
+          "position": 1,
+          "started_at": "2026-10-28T22:25:24.602424+09:00",
+          "status": "COMPLETE",
+          "valid": true,
+          "command": [
+            "C:\\tmp\\nntrainer-kv-20261023\\dropkv\\source\\build\\Applications\\CausalLM\\nntr_causallm_eval.exe",
+            "C:\\Users\\jmsml\\AppData\\Local\\Temp\\nntr-dropkv-eval-hm11e4oo"
+          ],
+          "log": "logs\\memory-4096-dropkv-02.log",
+          "memory_log": "logs\\memory-4096-dropkv-02-working-set.csv",
+          "target_pid": 3204,
+          "duration_s": 548.547,
+          "samples": 10590,
+          "sampled_peak_working_set_kib": 2987004.0,
+          "observed_os_peak_working_set_kib": 3004460.0,
+          "prefill_tokens": 4096,
+          "prefill_ms": 478216,
+          "prefill_tps": 8.56517,
+          "generation_tokens": 128,
+          "generation_ms": 67892,
+          "generation_tps": 1.88535,
+          "total_ms": 546139,
+          "e2e_ms": 547683,
+          "early_eos": false,
+          "kv_prefill_retained": 409,
+          "kv_peak_allocated_bytes": 2199552,
+          "kv_evictions": 1,
+          "failure": "",
+          "config_sha256": "d5692b6f3eec7ce9522e3cd9becc1a0cc50ec342120fb63127ea534ad8ac2c51",
+          "config_without_prompt": {
+            "model_type": "CausalLM",
+            "model_tensor_type": "FP32-FP32",
+            "model_file_name": "C:\\tmp\\nntrainer-baseline-20261011\\models\\qwen3-fp32\\nntr_qwen3_0.6b_fp32.bin",
+            "fc_layer_dtype": "FP32",
+            "embedding_dtype": "FP32",
+            "lora_rank": 0,
+            "lora_alpha": 0,
+            "lora_target": [],
+            "bad_word_ids": [],
+            "fsu": false,
+            "fsu_lookahead": 2,
+            "num_to_generate": 128,
+            "init_seq_len": 4096,
+            "max_seq_len": 4225,
+            "batch_size": 1,
+            "tokenizer_file": "C:\\tmp\\nntrainer-baseline-20261011\\models\\qwen3-fp32\\tokenizer.json",
+            "lmhead_dtype": "FP32",
+            "dropkv": {
+              "enabled": true,
+              "keep_ratio": 0.1,
+              "window": 8,
+              "kernel": 11,
+              "pooling": "max"
+            }
+          }
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 2,
+          "position": 2,
+          "started_at": "2026-10-28T22:34:34.349656+09:00",
+          "status": "COMPLETE",
+          "valid": true,
+          "command": [
+            "C:\\tmp\\nntrainer-baseline-20261011\\source\\build\\Applications\\CausalLM\\nntr_causallm_eval.exe",
+            "C:\\Users\\jmsml\\AppData\\Local\\Temp\\nntr-dropkv-eval-hm11e4oo"
+          ],
+          "log": "logs\\memory-4096-baseline-02.log",
+          "memory_log": "logs\\memory-4096-baseline-02-working-set.csv",
+          "target_pid": 11464,
+          "duration_s": 651.094,
+          "samples": 11813,
+          "sampled_peak_working_set_kib": 3163040.0,
+          "observed_os_peak_working_set_kib": 3163040.0,
+          "prefill_tokens": 4096,
+          "prefill_ms": 503711,
+          "prefill_tps": 8.13165,
+          "generation_tokens": 128,
+          "generation_ms": 143012,
+          "generation_tps": 0.89503,
+          "total_ms": 646891,
+          "e2e_ms": 648411,
+          "early_eos": false,
+          "kv_prefill_retained": null,
+          "kv_peak_allocated_bytes": null,
+          "kv_evictions": 0,
+          "failure": "",
+          "config_sha256": "3b02187df08938e647cdeec8e2c66993c37dd66b0c07aea04756af4afda28e1b",
+          "config_without_prompt": {
+            "model_type": "CausalLM",
+            "model_tensor_type": "FP32-FP32",
+            "model_file_name": "C:\\tmp\\nntrainer-baseline-20261011\\models\\qwen3-fp32\\nntr_qwen3_0.6b_fp32.bin",
+            "fc_layer_dtype": "FP32",
+            "embedding_dtype": "FP32",
+            "lora_rank": 0,
+            "lora_alpha": 0,
+            "lora_target": [],
+            "bad_word_ids": [],
+            "fsu": false,
+            "fsu_lookahead": 2,
+            "num_to_generate": 128,
+            "init_seq_len": 4096,
+            "max_seq_len": 4225,
+            "batch_size": 1,
+            "tokenizer_file": "C:\\tmp\\nntrainer-baseline-20261011\\models\\qwen3-fp32\\tokenizer.json",
+            "lmhead_dtype": "FP32"
+          }
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "baseline",
+          "trial": 3,
+          "position": 1,
+          "started_at": "2026-10-28T22:45:26.630471+09:00",
+          "status": "COMPLETE",
+          "valid": true,
+          "command": [
+            "C:\\tmp\\nntrainer-baseline-20261011\\source\\build\\Applications\\CausalLM\\nntr_causallm_eval.exe",
+            "C:\\Users\\jmsml\\AppData\\Local\\Temp\\nntr-dropkv-eval-hm11e4oo"
+          ],
+          "log": "logs\\memory-4096-baseline-03.log",
+          "memory_log": "logs\\memory-4096-baseline-03-working-set.csv",
+          "target_pid": 41372,
+          "duration_s": 618.984,
+          "samples": 11967,
+          "sampled_peak_working_set_kib": 3152744.0,
+          "observed_os_peak_working_set_kib": 3152744.0,
+          "prefill_tokens": 4096,
+          "prefill_ms": 467561,
+          "prefill_tps": 8.76035,
+          "generation_tokens": 128,
+          "generation_ms": 148813,
+          "generation_tps": 0.86014,
+          "total_ms": 616687,
+          "e2e_ms": 617960,
+          "early_eos": false,
+          "kv_prefill_retained": null,
+          "kv_peak_allocated_bytes": null,
+          "kv_evictions": 0,
+          "failure": "",
+          "config_sha256": "3b02187df08938e647cdeec8e2c66993c37dd66b0c07aea04756af4afda28e1b",
+          "config_without_prompt": {
+            "model_type": "CausalLM",
+            "model_tensor_type": "FP32-FP32",
+            "model_file_name": "C:\\tmp\\nntrainer-baseline-20261011\\models\\qwen3-fp32\\nntr_qwen3_0.6b_fp32.bin",
+            "fc_layer_dtype": "FP32",
+            "embedding_dtype": "FP32",
+            "lora_rank": 0,
+            "lora_alpha": 0,
+            "lora_target": [],
+            "bad_word_ids": [],
+            "fsu": false,
+            "fsu_lookahead": 2,
+            "num_to_generate": 128,
+            "init_seq_len": 4096,
+            "max_seq_len": 4225,
+            "batch_size": 1,
+            "tokenizer_file": "C:\\tmp\\nntrainer-baseline-20261011\\models\\qwen3-fp32\\tokenizer.json",
+            "lmhead_dtype": "FP32"
+          }
+        },
+        {
+          "phase": "memory",
+          "context": 4096,
+          "mode": "dropkv",
+          "trial": 3,
+          "position": 2,
+          "started_at": "2026-10-28T22:55:46.819339+09:00",
+          "status": "COMPLETE",
+          "valid": true,
+          "command": [
+            "C:\\tmp\\nntrainer-kv-20261023\\dropkv\\source\\build\\Applications\\CausalLM\\nntr_causallm_eval.exe",
+            "C:\\Users\\jmsml\\AppData\\Local\\Temp\\nntr-dropkv-eval-hm11e4oo"
+          ],
+          "log": "logs\\memory-4096-dropkv-03.log",
+          "memory_log": "logs\\memory-4096-dropkv-03-working-set.csv",
+          "target_pid": 17332,
+          "duration_s": 558.469,
+          "samples": 10826,
+          "sampled_peak_working_set_kib": 2984160.0,
+          "observed_os_peak_working_set_kib": 3059608.0,
+          "prefill_tokens": 4096,
+          "prefill_ms": 487417,
+          "prefill_tps": 8.40348,
+          "generation_tokens": 128,
+          "generation_ms": 68993,
+          "generation_tps": 1.85526,
+          "total_ms": 556574,
+          "e2e_ms": 557592,
+          "early_eos": false,
+          "kv_prefill_retained": 409,
+          "kv_peak_allocated_bytes": 2199552,
+          "kv_evictions": 1,
+          "failure": "",
+          "config_sha256": "d5692b6f3eec7ce9522e3cd9becc1a0cc50ec342120fb63127ea534ad8ac2c51",
+          "config_without_prompt": {
+            "model_type": "CausalLM",
+            "model_tensor_type": "FP32-FP32",
+            "model_file_name": "C:\\tmp\\nntrainer-baseline-20261011\\models\\qwen3-fp32\\nntr_qwen3_0.6b_fp32.bin",
+            "fc_layer_dtype": "FP32",
+            "embedding_dtype": "FP32",
+            "lora_rank": 0,
+            "lora_alpha": 0,
+            "lora_target": [],
+            "bad_word_ids": [],
+            "fsu": false,
+            "fsu_lookahead": 2,
+            "num_to_generate": 128,
+            "init_seq_len": 4096,
+            "max_seq_len": 4225,
+            "batch_size": 1,
+            "tokenizer_file": "C:\\tmp\\nntrainer-baseline-20261011\\models\\qwen3-fp32\\tokenizer.json",
+            "lmhead_dtype": "FP32",
+            "dropkv": {
+              "enabled": true,
+              "keep_ratio": 0.1,
+              "window": 8,
+              "kernel": 11,
+              "pooling": "max"
+            }
+          }
         }
       ],
-      "status": "INTERRUPTED",
+      "interrupted_logs": [
+        {
+          "original": "logs\\memory-4096-dropkv-01.log",
+          "retained": "logs\\memory-4096-dropkv-01.log.interrupted-20261028-221450-703566"
+        },
+        {
+          "original": "logs\\memory-4096-dropkv-01-working-set.csv",
+          "retained": "logs\\memory-4096-dropkv-01-working-set.csv.interrupted-20261028-221450-720756"
+        }
+      ],
+      "status": "COMPLETE",
       "started_at": "2026-10-23T09:34:53.784060+09:00",
-      "finished_at": null,
+      "finished_at": "2026-10-28T23:05:05.474183+09:00",
       "interrupted_at": "2026-10-23T12:31:05.927995+09:00",
       "interruption_reason": "USER_REQUESTED_STOP",
       "raw_manifest": "/home/jmsmlove02/26-2/nntrainer/build/validation/kv-sequential-20261023/dropkv/performance-windows/windows-comparison.json",
-      "raw_manifest_sha256": "ae6b73b4ceab5f3fdc01e22646fbd9baf3406d9d8e59ebe12d4b60728d81aed6",
+      "raw_manifest_sha256": "9469a4e0cfeb06234eb8b122dab17067404f0bc78946e0e9d3c97155a0f1da7a",
       "config_hash_encoding": "SHA-256 of json.dumps(original_config, sort_keys=True).encode(); prompt is protocol.prompts[context]",
-      "completed_measurements": 31,
+      "completed_measurements": 36,
       "expected_measurements": 36,
-      "pending_trials": [
-        {
-          "phase": "memory",
-          "context": 4096,
-          "mode": "baseline",
-          "trial": 2
-        },
-        {
-          "phase": "memory",
-          "context": 4096,
-          "mode": "baseline",
-          "trial": 3
-        },
-        {
-          "phase": "memory",
-          "context": 4096,
-          "mode": "dropkv",
-          "trial": 1
-        },
-        {
-          "phase": "memory",
-          "context": 4096,
-          "mode": "dropkv",
-          "trial": 2
-        },
-        {
-          "phase": "memory",
-          "context": 4096,
-          "mode": "dropkv",
-          "trial": 3
-        }
-      ],
-      "interrupted_trial": {
-        "phase": "memory",
-        "context": 4096,
-        "mode": "dropkv",
-        "trial": 1,
-        "position": 2,
-        "started_at": "2026-10-23T12:28:47.231634+09:00",
-        "status": "INTERRUPTED",
-        "valid": false,
-        "command": [
-          "C:\\tmp\\nntrainer-kv-20261023\\dropkv\\source\\build\\Applications\\CausalLM\\nntr_causallm_eval.exe",
-          "C:\\Users\\jmsml\\AppData\\Local\\Temp\\nntr-dropkv-eval-ixvnpuv4"
-        ],
-        "log": "logs\\memory-4096-dropkv-01.log",
-        "memory_log": "logs\\memory-4096-dropkv-01-working-set.csv",
-        "interrupted_at": "2026-10-23T12:31:05.927995+09:00",
-        "failure": "USER_REQUESTED_STOP; partial log retained; excluded from completed results"
-      }
+      "pending_trials": []
     }
   },
   "longbench": "EXCLUDED_BY_USER",
@@ -6752,17 +7019,26 @@
     },
     "windows": {
       "latency_change_pct": -12.801545497041722,
-      "memory_change_pct": null
+      "memory_change_pct": -3.0394538451092523
     }
   },
-  "completed_measurements": 67,
+  "completed_measurements": 72,
   "expected_measurements": 72,
-  "status": "PARTIAL_PAUSED_BY_USER",
+  "status": "COMPLETE",
   "publication_date": "2026-10-28",
-  "inference_executed_for_publication": false,
+  "inference_executed_for_publication": true,
+  "resume": {
+    "date": "2026-10-28",
+    "authorized_after_all_prs": true,
+    "new_measurements": 5,
+    "scope": "Windows memory, context 4096 only",
+    "protocol_unchanged": true,
+    "previous_publication_commit": "09337b529e7c46bdf4a1ca7bae53c3946e8cced1",
+    "prior_manifest_sha256": "ae6b73b4ceab5f3fdc01e22646fbd9baf3406d9d8e59ebe12d4b60728d81aed6"
+  },
   "audit": {
-    "complete": false,
-    "measured": 211,
+    "complete": true,
+    "measured": 216,
     "groups": [
       {
         "method": "manifoldkv",
@@ -6802,14 +7078,14 @@
       {
         "method": "dropkv",
         "platform": "windows",
-        "complete": false,
-        "measured": 31,
-        "manifest_sha256": "ae6b73b4ceab5f3fdc01e22646fbd9baf3406d9d8e59ebe12d4b60728d81aed6"
+        "complete": true,
+        "measured": 36,
+        "manifest_sha256": "9469a4e0cfeb06234eb8b122dab17067404f0bc78946e0e9d3c97155a0f1da7a"
       }
     ],
     "issues": [],
     "workload_warnings": [],
-    "checked_at": "2026-10-28T22:07:09.291430+09:00",
+    "checked_at": "2026-10-28T23:05:32.850854+09:00",
     "scope": "Recorded trials/configs, exact decode work, primary memory samples/peak/PID, logs, no trial overlap; no inference executed"
   },
   "local_artifact_sha256": {
@@ -6831,7 +7107,7 @@
     "dropkv/linux-test-core-proof.json": "aa55b28bef6866106ef35fbfa0fae6502c21e1e274008ecd330a96b404d0eba4",
     "dropkv/windows-512-peak-timing.json": "682d1b830aa9cd46eff8935f858d04f6270120e87a7a655b745c3d027886e7e1",
     "dropkv/windows-cli-disabled.stderr.log": "864c20e234d7cc8cea51ec62ea677f2832e4b9e0130830f397c6ea4ea775b3a8",
-    "dropkv/results.json": "1227cba2062c7914f607ab14d5353cabd98f0b69cd9e6cfc79688a291527a945",
+    "dropkv/results.json": "10d470a7017854afe19b0769c562730a649ac2b4d87dbeca01b4be25010a98f1",
     "dropkv/linux-runtime-core-proof.json": "890891dbf8d530c641c06aa44106761d666d61e7802cf90fa2d3b8a8ec39c11c",
     "dropkv/linux-function-checks.json": "d7519d2b90ab0c6eefd21897a3560a3509791d11b3112977640d49846f4879ef",
     "dropkv/linux-cli-uncompressed.stdout.log": "6ff927fcbd26342aa7505127fe4ee2c3d1f3e6877b862d6f368c6f0309b7741f",
@@ -6858,9 +7134,9 @@
     "dropkv/native-tests/windows-unit-tests.log": "6375ba9db94015f6c4ea42d7cfad75f44d94d70ba41e6daa2d9653bc47c89434",
     "dropkv/native-tests/build-proof.json": "e32d1e8a666ae3d358b07d1fad260b37cc29eb9752a8fbc7f7087ee43749dd8b",
     "dropkv/native-tests/windows-unit-tests.xml": "d2cd697fb3dffeee0ce50f5485057039cf1a11c7dd9594e67ba79eb6ea8785c6",
-    "dropkv/performance-windows/summary.md": "30a6f1a1cb28f0899ce13727959bf46ab0979fc8a9870e4d7ad4e43fcf2324fb",
-    "dropkv/performance-windows/windows-comparison.json": "ae6b73b4ceab5f3fdc01e22646fbd9baf3406d9d8e59ebe12d4b60728d81aed6",
-    "dropkv/performance-windows/windows-comparison.csv": "070c9c8ea0bbe10f65ca70e2e673d04ba914dce4784cd67008178808d1d2a316",
+    "dropkv/performance-windows/summary.md": "533728b5fee1b6fd21c45238900671823c132ccd3e88891c450bd7557637ce56",
+    "dropkv/performance-windows/windows-comparison.json": "9469a4e0cfeb06234eb8b122dab17067404f0bc78946e0e9d3c97155a0f1da7a",
+    "dropkv/performance-windows/windows-comparison.csv": "67e461de7afd2579c97ae7761edfc6e7f0b8a9b9503cd7563445605fe419274d",
     "dropkv/performance-linux/logs/latency-2048-dropkv-02.log": "447d07b39b2b3391cbd0ba15cb2ee700b0c6ceb096a313776ae3b98a50c16293",
     "dropkv/performance-linux/logs/memory-2048-baseline-03.log": "4afa29f0f8715073bf1300479c5c67b4a65464790c414fb7a29ec5174369c31e",
     "dropkv/performance-linux/logs/memory-2048-baseline-02.log": "c80f33323f4f3d09d48941683895042fdd087a048c183ec2a856dc54b417cf2f",
@@ -6900,6 +7176,7 @@
     "dropkv/performance-linux/logs/latency-4096-baseline-02.log": "57d6ee00c8650097ea1c6b523687a43142747ea719e98d02b6f562848ef96251",
     "dropkv/performance-linux/logs/latency-4096-dropkv-02.log": "3aa9dfc6b23ee77cd80ef76b9599c551f389ed24a209ceef4510659aa3a088c4",
     "dropkv/performance-windows/logs/latency-2048-dropkv-02.log": "d730f57c440eb0a8efada84e7e13531d1301cbe1b5890577ef63b58d85e1e187",
+    "dropkv/performance-windows/logs/memory-4096-baseline-02-working-set.csv": "1583f4cc373d9e5cddafbb151a4a562533062f71bd3cef4d1e9815e7dbe96bc4",
     "dropkv/performance-windows/logs/memory-2048-baseline-03.log": "89d9729d8b5a9c5fbe0fc2cf98afa657f4b45c746b01be61c96ef9e71fa93d11",
     "dropkv/performance-windows/logs/memory-2048-baseline-02.log": "c21782865117864fd05e96ae80d7891ba674383e5f3b1a888be0f038136ccae7",
     "dropkv/performance-windows/logs/memory-2048-baseline-01-working-set.csv": "64dfa726c98c183c0e1600ed0e5fbf405f4661d0fb8ac6f69ef3974ec69bd71f",
@@ -6907,12 +7184,17 @@
     "dropkv/performance-windows/logs/memory-512-baseline-03-working-set.csv": "947f1a64367e01d9e2cf16d0615bce2701f9e73fc0bd79f60222450e5233e627",
     "dropkv/performance-windows/logs/latency-2048-baseline-03.log": "b3561e089f81505f8d7a9e9216939c0139f2571398efe9c9281dfe63ed457d8c",
     "dropkv/performance-windows/logs/latency-512-dropkv-03.log": "22b9d6ff30a72cb5c3d37dd5fadcd2e0a5f836412de8a94c843930021d4d0629",
-    "dropkv/performance-windows/logs/memory-4096-dropkv-01.log": "400dee4867e0a921760bdd9cf42c3b3409f510e5325fa00eb066b7e13e9fad9b",
+    "dropkv/performance-windows/logs/memory-4096-dropkv-01.log": "7acbbb2c0e728a222414c6b677eaa4e4e4ac65ff4e0b4bec07c4778b3a5c6551",
     "dropkv/performance-windows/logs/memory-512-baseline-01.log": "27f28fa499c4069f21f6ffbb8cd6dc9c10973c4a5d470e393b3ee7ffee9bb2fe",
     "dropkv/performance-windows/logs/latency-4096-baseline-01.log": "b7d455a7e663b2d9bb6d6753ccb11e981a32dd2b886ea7a20c8291b8fa0ac377",
+    "dropkv/performance-windows/logs/memory-4096-baseline-03.log": "a8c7039bcb4962dc60d3dc67c6bd859a25144f80f3674347424e8304d844d3ba",
     "dropkv/performance-windows/logs/memory-512-dropkv-02-working-set.csv": "e8b73290fdd31685dae0720a44117ec1a244d110fbb987c62386384096300997",
+    "dropkv/performance-windows/logs/memory-4096-dropkv-03-working-set.csv": "998069a14eafb6e86deb4c9d62f387205dfe290eaa37980d9b3167aec44a1e2d",
+    "dropkv/performance-windows/logs/memory-4096-dropkv-02-working-set.csv": "695c22c3e6c27601f75edb8641c0b79fb080d5e8ad2a9cb8337066566d402f64",
+    "dropkv/performance-windows/logs/memory-4096-dropkv-03.log": "a4ac5b432d651db42722ad53e0d2f08ea99a8d7122e59d0ed924ad565c1b9a55",
     "dropkv/performance-windows/logs/latency-2048-baseline-01.log": "563a3ceb85a83a8df47e4ce305b1be24bfa21915142565ae2e4327f54ac1e01b",
     "dropkv/performance-windows/logs/memory-2048-dropkv-01.log": "c97837d136d170a0b3df9a267897db96f7df9635004f0f9578b674800dc0092d",
+    "dropkv/performance-windows/logs/memory-4096-dropkv-01.log.interrupted-20261028-221450-703566": "400dee4867e0a921760bdd9cf42c3b3409f510e5325fa00eb066b7e13e9fad9b",
     "dropkv/performance-windows/logs/memory-512-dropkv-01.log": "c837c4724b4fdcd61a2adeb3b89ca31061f721da303c71fd03e1a07ee9a71c13",
     "dropkv/performance-windows/logs/memory-2048-dropkv-01-working-set.csv": "b3fbdbd72c88aa3c73fa96fdebab8e10abe28ca7d981d2843b430fc1abebfe73",
     "dropkv/performance-windows/logs/memory-512-baseline-02-working-set.csv": "0af2eac4540113d8d6cb246b82880799d99c987c3f39152eddfdc0d3ce51cc4a",
@@ -6924,12 +7206,15 @@
     "dropkv/performance-windows/logs/memory-512-baseline-01-working-set.csv": "bf6fb3b83f9a2d19dcf9475aac064fd237d39993f38e3070cc3272d18dfa59f4",
     "dropkv/performance-windows/logs/memory-2048-baseline-03-working-set.csv": "3a303ede6bfc674d6e0c405dc1a3d159513ff5675fdbf97cef2391c6d58d07e8",
     "dropkv/performance-windows/logs/latency-512-baseline-03.log": "7fa5e58c520ffc612eb9de0ffbe097bca9f1353934c97d366e53dcc7a80097b9",
+    "dropkv/performance-windows/logs/memory-4096-baseline-02.log": "9535f434db6ba48fd65a6eb31c3ea3e2dbfafe3aa12aa7ad21f494f6c94c842d",
     "dropkv/performance-windows/logs/latency-4096-dropkv-01.log": "9dcd4cfb9e766dc19e85675db4bce226993d6213c1146f99dc57c93a241ff6b9",
     "dropkv/performance-windows/logs/memory-512-dropkv-03-working-set.csv": "df70a8febad82a75c44f432b5c594a4e3e95b49af004beb03975bf327dfd4ab8",
     "dropkv/performance-windows/logs/latency-4096-dropkv-03.log": "8aaac1744a9b7f92c76aa90b60145c250b148ca0fbf1222aa00eb8b00b0da8d1",
-    "dropkv/performance-windows/logs/memory-4096-dropkv-01-working-set.csv": "e1ab3f96f40f08f23b8ab5fd4cb3da13a8379acae47794b8734245ae2b55ccf0",
+    "dropkv/performance-windows/logs/memory-4096-dropkv-01-working-set.csv": "b6148732834ceec4eea81e48fee8999208ad9f1643daa8d70b1b7eaf64d43d54",
+    "dropkv/performance-windows/logs/memory-4096-dropkv-01-working-set.csv.interrupted-20261028-221450-720756": "e1ab3f96f40f08f23b8ab5fd4cb3da13a8379acae47794b8734245ae2b55ccf0",
     "dropkv/performance-windows/logs/latency-2048-dropkv-01.log": "b2dcd51c7f9fa5d67f24b8ae33359ca473bd9d54480f382c0eb2476ebdab933d",
     "dropkv/performance-windows/logs/memory-512-baseline-02.log": "863adc7f95a0dbf238bb4df716022042cd49bf8c39a4749c69b872a750fbfa83",
+    "dropkv/performance-windows/logs/memory-4096-baseline-03-working-set.csv": "5ea5e88142fa5b4f3c89b573e51fd83ba33a39b8483c9f10d5535df92121e8e2",
     "dropkv/performance-windows/logs/function-512-dropkv-00.log": "1b42f3aa1e7d092f50ea9466636927a18b5b50bf87b0e02911f279e5a103bc7f",
     "dropkv/performance-windows/logs/latency-2048-baseline-02.log": "79c79030785fd87adffbc7edd1da4b89e11ee613f76fe2ae2c0491bec6fe341d",
     "dropkv/performance-windows/logs/memory-2048-dropkv-03-working-set.csv": "ace15a192f0e1708905a581478ea304ca66407b5f885fc05efc216dc340558c4",
@@ -6942,6 +7227,7 @@
     "dropkv/performance-windows/logs/memory-2048-baseline-01.log": "264d7a7a3e090f0803fdda449ecd850d490aeed28e9fe670c0aaf4f4850883f4",
     "dropkv/performance-windows/logs/memory-4096-baseline-01-working-set.csv": "3c6b8c0644264711dcb3c660a07a249073c290bd7b0fb1e36d4ef315874f36b6",
     "dropkv/performance-windows/logs/function-512-baseline-00.log": "ed8c405cd8257411d71e0a9884a14978eb884a765a1cd22feb1e9e567f11a879",
+    "dropkv/performance-windows/logs/memory-4096-dropkv-02.log": "c6126eda80cd3f3c263984069c7c3db4be05dbf975a9b0b4aa59efb337436679",
     "dropkv/performance-windows/logs/memory-4096-baseline-01.log": "1651943c5a655f9b18ca9e5b07d2394f6dd8e137f89349e546d806f9ec4aaa92",
     "dropkv/performance-windows/logs/memory-2048-dropkv-02-working-set.csv": "789b1a522e61320a18d1b1021aecc73fb0973001db7cfc9a0fbb60e7f70e66bc",
     "dropkv/performance-windows/logs/latency-4096-baseline-03.log": "9ce050289934d7ca87419f4fb94ee1413c257b27f654fc831b492680ace3733b",

@@ -22,9 +22,9 @@ converted once per head; norms are reused and residual distances use dot
 products. Only one probability row is stored, with no window*N*dim tensor.
 This ports the eviction rule, not the reported GPU acceleration.
 
-Implementation status: **Linux completed; native Windows latency completed; memory incomplete; 67/72 measurements; paused by user**.
+Implementation status: **Linux and native Windows validation completed; 72/72 measurements; final five Windows memory trials completed on 2026-10-28**.
 See [CPU results and limitations](results/20261023-cpu.md) and [individual trials/provenance](results/20261023-cpu.json).
-LongBench and quality evaluation were excluded. Publication did not resume measurements.
+LongBench and quality evaluation were excluded. The final five Windows 4096-token memory trials were resumed with the identical protocol and artifacts on 2026-10-28 after PR creation.
 
 The supported entry point is `CausalLM::run`: Qwen3, FP32 weights/activations,
 batch 1, CPU, full causal attention, one fresh full prefill, then single-token
@@ -54,7 +54,7 @@ cases, real Tensor K/V gather and owner release, absolute-position boundaries,
 disabled/unpruned tiny-model comparisons, activation, repeated decode, and
 unsupported settings. The recorded Linux and native Windows selected suites passed; see the linked CPU results.
 
-Execution history: the three methods were measured sequentially on Linux and native Windows after the user's signal. The pipeline was stopped at the user's request with DropKV Windows memory incomplete. No new inference or benchmarks were run for publication. Use the result's completed counts rather than assuming a complete sweep.
+Execution history: the three methods were measured sequentially on Linux and native Windows after the user's signal. The pipeline was paused on 2026-10-23 and resumed after all eight PRs were posted on 2026-10-28. Only the five pending Windows 4096-token memory trials were run, with matching helper, protocol, models, binaries and runtime hashes; all 72/72 measurements are now complete.
 
 ## Reproduce performance measurements
 
