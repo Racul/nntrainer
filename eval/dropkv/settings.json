@@ -1,0 +1,10 @@
+{
+  "skip_prefill": false,
+  "dropkv": {
+    "enabled": true,
+    "keep_ratio": 0.1,
+    "window": 8,
+    "kernel": 11,
+    "pooling": "max"
+  }
+}

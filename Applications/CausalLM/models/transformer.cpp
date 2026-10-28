@@ -898,6 +898,10 @@ Transformer::createKVCachePlaceholders(const int layer_id, int n_heads) {
 Tensor Transformer::wireAttentionKVCache(const int layer_id, int n_heads,
                                          LayerHandle mha, Tensor q, Tensor k,
                                          Tensor v, bool use_int8) {
+  if (!compact_kv_properties_.empty()) {
+    mha->setProperty(compact_kv_properties_);
+    mha->setProperty({"dropkv_layer=" + std::to_string(layer_id)});
+  }
   if (use_int8)
     return mha({q, k, v});
   // External KV cache placeholders (per-layer). Their actual storage is owned
