@@ -211,7 +211,8 @@ def load_scorer(official):
 def special_tokens(tokenizer_file):
     """Strings of the tokenizer's special tokens, e.g. <|im_end|>."""
     added = json.loads(Path(tokenizer_file).read_text(encoding="utf-8")).get("added_tokens", [])
-    return sorted({token["content"] for token in added if token.get("special")}, key=len, reverse=True)
+    return sorted({token["content"] for token in added if token.get("special")},
+                  key=lambda token: (-len(token), token))
 
 
 def clean_prediction(pred, specials):
