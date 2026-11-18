@@ -8,16 +8,22 @@
  * @bug    No known bugs except for NYI items
  */
 
+#include <causallm_test_utils.h>
+#include <qwen3_causallm.h>
 #include <rkv.h>
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <random>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -1036,4 +1042,259 @@ TEST(RKVTest, CalSimilarityGolden) {
       EXPECT_NEAR(red[i], item.second[i], 1e-5 * item.second[i])
         << item.first << " " << i;
   }
+}
+
+namespace {
+
+/**
+ * @brief Tiny Qwen3 CausalLM adapter (inference shared by CausalLMTestAdapter)
+ */
+using TinyQwen3CausalLM =
+  causallm_test::CausalLMTestAdapter<causallm::Qwen3CausalLM>;
+
+/** @brief A 14-token prompt of the tiny word-level tokenizer. */
+const char *kTinyPrompt =
+  "hello world tok3 tok4 tok5 tok6 tok7 tok8 tok9 tok10 tok11 tok12 tok13 "
+  "tok14";
+constexpr unsigned int kTinyPromptTokens = 14;
+
+/** @brief Capture std::clog for the lifetime of the object. */
+class ClogCapture {
+public:
+  ClogCapture() : old_(std::clog.rdbuf(text_.rdbuf())) {}
+  ~ClogCapture() { std::clog.rdbuf(old_); }
+  std::string str() const { return text_.str(); }
+
+private:
+  std::ostringstream text_;
+  std::streambuf *old_;
+};
+
+/**
+ * @brief Two-layer tiny Qwen3 (GQA 2) with random weights, a 14-token
+ * prompt and 6 generated tokens (EOS banned), run through CausalLM::run().
+ */
+std::string runTinyQwen3(const std::string &test_name,
+                         const causallm::json &extra_nntr,
+                         std::string *log = nullptr,
+                         TinyQwen3CausalLM **keep = nullptr) {
+  static std::vector<std::unique_ptr<TinyQwen3CausalLM>> alive;
+  const auto files = causallm_test::makeTinyCausalLMFiles(
+    "RKVModelTest", test_name, "Qwen3_FP32");
+  causallm::json cfg = {
+    {"architectures", {"Qwen3ForCausalLM"}},
+    {"bos_token_id", 0},
+    {"eos_token_id", {31}},
+    {"head_dim", 8},
+    {"hidden_size", 64},
+    {"intermediate_size", 64},
+    {"is_causal", true},
+    {"max_position_embeddings", 64},
+    {"model_type", "qwen3"},
+    {"num_attention_heads", 8},
+    {"num_hidden_layers", 2},
+    {"num_key_value_heads", 4},
+    {"rms_norm_eps", 1e-5},
+    {"rope_theta", 10000},
+    {"tie_word_embeddings", true},
+    {"vocab_size", 32},
+  };
+  auto nntr = causallm_test::makeTinyNntrainerConfig(
+    files.tokenizer_path, causallm_test::makeTinyFp32DataType());
+  nntr["init_seq_len"] = kTinyPromptTokens + 1;
+  nntr["max_seq_len"] = 32;
+  nntr["num_to_generate"] = 6;
+  nntr["bad_word_ids"] = std::vector<unsigned int>{31};
+  for (const auto &item : extra_nntr.items())
+    nntr[item.key()] = item.value();
+
+  auto generation = causallm_test::makeTinyGenerationConfig();
+  auto model = std::make_unique<TinyQwen3CausalLM>(cfg, generation, nntr);
+  model->initializeModel();
+  std::mt19937 rng(1234);
+  std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
+  model->forEachLayer([&](ml::train::Layer &layer,
+                          nntrainer::RunLayerContext &context, void *) {
+    for (unsigned int i = 0; i < context.getNumWeights(); ++i) {
+      auto &weight = context.getWeight(i);
+      if (weight.getDataType() != ml::train::TensorDim::DataType::FP32)
+        continue;
+      float *data = weight.getData<float>();
+      for (size_t k = 0; k < weight.size(); ++k)
+        data[k] =
+          causallm_test::isRmsNormLayerType(layer.getType()) ? 1.0f : dist(rng);
+    }
+  });
+  {
+    ClogCapture capture;
+    model->runPrompt(kTinyPrompt);
+    if (log)
+      *log = capture.str();
+  }
+  const std::string text = model->getOutputText(0);
+  if (keep) {
+    *keep = model.get();
+    alive.push_back(std::move(model));
+  }
+  return text;
+}
+
+/** @brief Values of "key=<v>" on log lines starting with prefix. */
+std::vector<std::string> logValues(const std::string &log,
+                                   const std::string &prefix,
+                                   const std::string &key) {
+  std::vector<std::string> out;
+  std::stringstream stream(log);
+  std::string line;
+  while (std::getline(stream, line)) {
+    if (line.rfind(prefix, 0) != 0)
+      continue;
+    const auto at = line.find(" " + key + "=");
+    if (at == std::string::npos)
+      continue;
+    const auto begin = at + key.size() + 2;
+    out.push_back(line.substr(begin, line.find(' ', begin) - begin));
+  }
+  return out;
+}
+
+} // namespace
+
+/**
+ * @brief ratio 0 (keep: page release only) and a budget that covers the run
+ * take the R-KV path without compressing and generate what the unchanged
+ * path does.
+ */
+TEST(RKVModelTest, KeepAndCoveringBudgetMatchBaseline) {
+  std::string log;
+  const auto base = runTinyQwen3("Base", causallm::json::object(), &log);
+  EXPECT_FALSE(base.empty());
+  EXPECT_EQ(log.find("[R-KV"), std::string::npos);
+
+  const auto keep = runTinyQwen3("Keep", {{"rkv", {{"ratio", 0}}}}, &log);
+  EXPECT_EQ(keep, base);
+  EXPECT_NE(log.find("[R-KV] keep prompt=14"), std::string::npos) << log;
+  EXPECT_EQ(log.find("[R-KV layer="), std::string::npos);
+
+  const auto covered = runTinyQwen3(
+    "Covered", {{"rkv", {{"budget", 31}, {"window", 4}, {"buffer", 2}}}}, &log);
+  EXPECT_EQ(covered, base);
+  EXPECT_NE(log.find("[R-KV] budget=31 window=4"), std::string::npos) << log;
+  EXPECT_EQ(log.find("[R-KV layer="), std::string::npos) << log;
+}
+
+/**
+ * @brief Prefill and decode compression under every option: each layer logs
+ * the scheduled events and keeps the budget.
+ */
+TEST(RKVModelTest, CompressesAndGenerates) {
+  const causallm::json base = {{"budget", 8}, {"window", 4}, {"buffer", 2}};
+  std::vector<causallm::json> settings;
+  for (double lambda : {0.0, 0.1, 1.0})
+    for (const char *heads : {"per_kv_head", "shared"}) {
+      auto s = base;
+      s["lambda"] = lambda;
+      s["heads"] = heads;
+      settings.push_back(s);
+    }
+  for (const auto &extra :
+       {causallm::json{{"retain_axis", "paper"}, {"retain", 2}},
+        causallm::json{{"gqa_pool", "mean"}, {"threshold", 0.2}},
+        causallm::json{{"decode_compress", false}},
+        causallm::json{{"kernel", 1}}}) {
+    auto s = base;
+    for (const auto &item : extra.items())
+      s[item.key()] = item.value();
+    settings.push_back(s);
+  }
+  auto ratio = causallm::json{{"ratio", 0.5}, {"window", 4}, {"buffer", 4}};
+  settings.push_back(ratio);
+
+  for (const auto &rkv : settings) {
+    std::string log, text;
+    ASSERT_NO_THROW(text = runTinyQwen3("Compress", {{"rkv", rkv}}, &log))
+      << rkv.dump();
+    EXPECT_FALSE(text.empty()) << rkv.dump();
+    const unsigned int budget =
+      rkv.contains("budget") ? rkv["budget"].get<unsigned int>() : 7u;
+    const unsigned int buffer = rkv["buffer"].get<unsigned int>();
+    const bool decode = rkv.value("decode_compress", true);
+    for (const char *layer : {"[R-KV layer=0]", "[R-KV layer=1]"}) {
+      const auto events = logValues(log, layer, "event");
+      const auto pos = logValues(log, layer, "pos");
+      const auto rows = logValues(log, layer, "rows");
+      const auto kept = logValues(log, layer, "kept");
+      ASSERT_FALSE(events.empty()) << rkv.dump() << "\n" << log;
+      EXPECT_EQ(events[0], "prefill");
+      EXPECT_EQ(pos[0], std::to_string(kTinyPromptTokens - 1));
+      EXPECT_EQ(rows[0], std::to_string(kTinyPromptTokens));
+      for (size_t e = 0; e < events.size(); ++e) {
+        EXPECT_EQ(kept[e], std::to_string(budget)) << rkv.dump();
+        if (e == 0)
+          continue;
+        EXPECT_EQ(events[e], "decode");
+        const unsigned int p = std::stoul(pos[e]);
+        EXPECT_EQ(p % buffer, 0u) << rkv.dump();
+        EXPECT_LE(std::stoul(rows[e]), budget + buffer);
+      }
+      // Decode positions 14.. at every buffer multiple while rows > budget.
+      size_t expected = 1;
+      if (decode) {
+        unsigned int r = budget;
+        const unsigned int last =
+          events.size() > 1 ? std::stoul(pos.back()) : kTinyPromptTokens;
+        for (unsigned int p = kTinyPromptTokens; p <= last; ++p)
+          if (++r > budget && p % buffer == 0) {
+            r = budget;
+            ++expected;
+          }
+        EXPECT_GT(events.size(), 1u) << rkv.dump();
+      }
+      EXPECT_EQ(events.size(), expected) << rkv.dump() << "\n" << log;
+    }
+    EXPECT_EQ(logValues(log, "[R-KV layer=0]", "pos"),
+              logValues(log, "[R-KV layer=1]", "pos"));
+  }
+}
+
+/**
+ * @brief The compressed cache gives the same tokens on the flash (gemm) arm
+ * and on the per-row arm, and compression reaches the output.
+ */
+TEST(RKVModelTest, SameOnFlashAndPerRowArms) {
+  const auto base_flash =
+    runTinyQwen3("ArmsBaseFlash", {{"use_flash_attention", true}});
+  const auto base_row =
+    runTinyQwen3("ArmsBaseRow", {{"use_flash_attention", false}});
+  ASSERT_EQ(base_flash, base_row) << "the two arms already differ";
+  const causallm::json rkv = {{"budget", 6}, {"window", 2}, {"buffer", 2}};
+  const auto flash =
+    runTinyQwen3("ArmsFlash", {{"rkv", rkv}, {"use_flash_attention", true}});
+  const auto row =
+    runTinyQwen3("ArmsRow", {{"rkv", rkv}, {"use_flash_attention", false}});
+  EXPECT_EQ(flash, row);
+  EXPECT_NE(flash, base_flash);
+}
+
+/**
+ * @brief Continued runs, serialized KV caches and bad settings are rejected.
+ */
+TEST(RKVModelTest, RejectsUnsupportedRuns) {
+  TinyQwen3CausalLM *model = nullptr;
+  runTinyQwen3("Rejects", {{"rkv", {{"ratio", 0.5}, {"window", 4}}}}, nullptr,
+               &model);
+  ASSERT_NE(model, nullptr);
+  EXPECT_THROW(model->runPrompt(kTinyPrompt), std::invalid_argument);
+  EXPECT_THROW(model->save_kvcache("/nonexistent/rkv.bin", 1),
+               std::invalid_argument);
+  EXPECT_THROW(model->load_kvcache("/nonexistent/rkv.bin", 1),
+               std::invalid_argument);
+  EXPECT_THROW(
+    runTinyQwen3("RejectsWindow", {{"rkv", {{"ratio", 0.5}, {"window", 0}}}}),
+    std::invalid_argument);
+  EXPECT_THROW(
+    runTinyQwen3("RejectsKey", {{"rkv", {{"ratio", 0.5}, {"windows", 4}}}}),
+    std::invalid_argument);
+  EXPECT_THROW(runTinyQwen3("RejectsType", {{"rkv", 0.5}}),
+               std::invalid_argument);
 }
