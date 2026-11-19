@@ -28,6 +28,7 @@
 #include <engine.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -89,7 +90,7 @@ void clLaunchStatDump(const char *phase);
 #include <cuda_context_manager.h>
 #include <cuda_elementwise.h>
 #include <cuda_emb_gather.h> // [reload] gather LUT teardown
-#include <cuda_fc_qs4cx.h> // [lmhead-tie-lut] tied-head LUT registration
+#include <cuda_fc_qs4cx.h>   // [lmhead-tie-lut] tied-head LUT registration
 #include <cuda_runtime.h>
 #include <cuda_stream_manager.h>
 #endif
@@ -399,6 +400,24 @@ void CausalLM::setupParameters(json &cfg, json &generation_cfg,
     SAMPLING_SEED = causallm::kDefaultSamplingSeed;
   rng.seed(SAMPLING_SEED);
   global_token_len = 0;
+
+  // Optional R-KV compression; omitting "rkv" keeps the existing path.
+  rkv_config_.clear();
+  if (nntr_cfg.contains("rkv")) {
+    const auto &settings = nntr_cfg.at("rkv");
+    if (!settings.is_object())
+      throw std::invalid_argument("rkv must be a JSON object");
+    causallm::RKVConfig config;
+    for (const auto &item : settings.items())
+      config.set(item.key(), item.value().is_string()
+                               ? item.value().get<std::string>()
+                               : item.value().dump());
+    config.validate();
+    if (cfg.value("model_type", std::string()) != "qwen3" ||
+        nntr_cfg.value("model_tensor_type", std::string()) != "FP32-FP32")
+      throw std::invalid_argument("R-KV currently supports Qwen3 FP32-FP32");
+    rkv_config_ = config.serialize();
+  }
 }
 
 void CausalLM::allocateAndBindKVCache() {
@@ -947,6 +966,8 @@ std::string CausalLM::kvCacheModelTag() const {
 }
 
 void CausalLM::save_kvcache(std::string path, int to_) {
+  if (!rkv_config_.empty())
+    throw std::invalid_argument("R-KV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     throw std::runtime_error(
       "save_kvcache called before allocateAndBindKVCache()");
@@ -991,6 +1012,8 @@ void CausalLM::setPrecomputedKVCache(const std::string &path,
 }
 
 void CausalLM::load_kvcache(std::string path, int to_) {
+  if (!rkv_config_.empty())
+    throw std::invalid_argument("R-KV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1004,6 +1027,8 @@ void CausalLM::load_kvcache(std::string path, int to_) {
 
 unsigned int CausalLM::resumeFromKVCacheFile(const std::string &path,
                                              unsigned int token_len) {
+  if (!rkv_config_.empty())
+    throw std::invalid_argument("R-KV does not support serialized KV caches");
   if (!kv_cache.isAllocated()) {
     allocateAndBindKVCache();
   }
@@ -1349,6 +1374,14 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
                              "initialize() before run().");
   }
 
+  if (!rkv_config_.empty() &&
+      (BATCH_SIZE != 1 || SKIP_PREFILL || USE_KVCACHE ||
+       global_token_len != 0 || causallm_engine() != "cpu" ||
+       prefillDriveChunk() != 0))
+    throw std::invalid_argument(
+      "R-KV requires a fresh batch-one CPU run without skipped, cached or "
+      "chunked prefill");
+
   struct StreamerEndGuard {
     BaseStreamer *streamer;
     ~StreamerEndGuard() { streamer_end(streamer); }
@@ -1519,6 +1552,50 @@ void CausalLM::run(const WSTR prompt, bool do_sample, const WSTR system_prompt,
   _input.clear();
 
   unsigned int init_len = init_input.size();
+  if (!rkv_config_.empty()) {
+    if (!init_len)
+      throw std::invalid_argument("R-KV requires a nonempty prompt");
+    // Every MHA layer gets the settings and its run identity ("layer,prompt").
+    std::vector<bool> seen(static_cast<size_t>(NUM_LAYERS), false);
+    unsigned int layers = 0;
+    std::function<void(ml::train::Layer &, nntrainer::RunLayerContext &,
+                       void *)>
+      configure = [&](ml::train::Layer &layer, nntrainer::RunLayerContext &,
+                      void *) {
+        if (layer.getType() != causallm::MHACoreLayer::type)
+          return;
+        const auto &name = layer.getName();
+        const auto end = name.find('_');
+        size_t index = seen.size();
+        if (name.compare(0, 5, "layer") == 0 && end != std::string::npos) {
+          try {
+            index = causallm::RKVConfig::parseUnsigned(name.substr(5, end - 5));
+          } catch (const std::invalid_argument &) {
+          }
+        }
+        if (index >= seen.size() || seen[index] ||
+            name != "layer" + std::to_string(index) + "_attention")
+          throw std::invalid_argument("Invalid R-KV attention layer name " +
+                                      name);
+        layer.setProperty(
+          {"rkv=" + rkv_config_, "rkv_run=" + std::to_string(index) + "," +
+                                   std::to_string(init_len)});
+        seen[index] = true;
+        ++layers;
+      };
+    model->forEachLayer(configure, nullptr);
+    if (layers != static_cast<unsigned int>(NUM_LAYERS))
+      throw std::invalid_argument("R-KV requires an MHA cache in every layer");
+    // Like an on-demand cache, hold no KV pages before the prefill: each layer
+    // faults in its prompt rows and releases what it compresses away.
+    for (int i = 0; i < NUM_LAYERS; ++i) {
+      causallm::rkvReleaseRows(kv_cache.getKeyCache(i), 0);
+      causallm::rkvReleaseRows(kv_cache.getValueCache(i), 0);
+    }
+    std::clog << "[R-KV] "
+              << causallm::RKVConfig::parse(rkv_config_).describe(init_len)
+              << std::endl;
+  }
   float *input_sample =
     (float *)malloc(sizeof(float) * BATCH_SIZE * MAX_SEQ_LEN);
   std::vector<bool> eos_list(BATCH_SIZE, false);

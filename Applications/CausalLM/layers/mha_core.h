@@ -39,6 +39,7 @@
 #include <cpu_backend.h>
 #include <layer_impl.h>
 #include <limits.h>
+#include <rkv.h>
 #include <util_simd.h>
 
 #include <map>
@@ -521,6 +522,7 @@ private:
 
   float epsilon;            /** to avoid overflow */
   unsigned int cache_index; /** idx of kv cache */
+  causallm::RKVState rkv_;  /** Optional R-KV compression of this layer. */
 
   /**
    * @brief Honor the LayerImpl `skip_prefill` property. Gemma4 KV-shared
@@ -575,9 +577,12 @@ private:
   unsigned int kv_ring_cap = 0;
   /** Map an absolute cache position to its physical ring row (identity when the
    * ring is off). Used ONLY for cache-storage row offsets: RoPE and the
-   * causal/window masks keep the absolute position. */
+   * causal/window masks keep the absolute position. After R-KV compacts the
+   * cache (never together with a ring), rows shift down by the removed
+   * count. */
   inline size_t cacheRow(size_t abs_pos) const {
-    return kv_ring_cap ? (abs_pos % (size_t)kv_ring_cap) : abs_pos;
+    return kv_ring_cap ? (abs_pos % (size_t)kv_ring_cap)
+                       : abs_pos - rkv_.removed();
   }
   bool use_sink = false;
   float attn_logit_softcapping = 0.0f;
